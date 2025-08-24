@@ -2,10 +2,10 @@
 import streamlit as st
 import pandas as pd
 
-from .data import load_all, next_deadline_ist
-from .features import build_player_master, fixture_softness
-from .model import baseline_expected_points
-from .optimizer import pick_squad_greedy
+from fpl_tool.data import load_all, next_deadline_ist
+from fpl_tool.features import build_player_master, fixture_softness
+from fpl_tool.model import baseline_expected_points
+from fpl_tool.optimizer import pick_squad_greedy
 
 st.set_page_config(page_title="FPL Analytics – Render Free", layout="wide")
 

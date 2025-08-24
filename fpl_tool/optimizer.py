@@ -65,7 +65,9 @@ def pick_squad_greedy(pred_df, budget=100.0):
             delta_cost = float(cand["price"]) - float(worst["price"])
             if total_cost + delta_cost <= budget and cand["xPts"] > worst["xPts"]:
                 # swap
-                squad = squad.drop(index=worst.name).append(cand)
+                base = squad.drop(index=worst.name)
+                add  = cand.to_frame().T
+                squad = pd.concat([base, add], axis=0)
                 team_counts[worst["team"]] = max(0, team_counts.get(worst["team"],1) - 1)
                 team_counts[cand["team"]] = team_counts.get(cand["team"],0) + 1
                 total_cost += delta_cost

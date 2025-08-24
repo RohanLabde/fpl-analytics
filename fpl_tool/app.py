@@ -65,23 +65,23 @@ if not pred.empty:
     def label_row(r):
         return f"{r['web_name']} ({r['name']}, {r['pos']}, {r['price']:.1f})"
 
-# --- build nice labels keyed by ID (no collisions) ---
-def label_for_row(r):
-    # ID is kept internal; format_func shows only label
-    return f"{r['web_name']} ({r['name']}, {r['pos']}, {r['price']:.1f})"
-
-opts = pred[["id","web_name","name","pos","price"]].copy()
-label_map = {int(r.id): label_for_row(r) for r in opts.itertuples(index=False)}
-
-# Multiselect over IDs; Streamlit shows labels via format_func
-squad_ids = st.multiselect(
-    "Select exactly 15 players from your current squad",
-    options=list(label_map.keys()),              # list of player IDs
-    format_func=lambda pid: label_map.get(int(pid), str(pid)),
-    max_selections=15
-)
-
-current_cost = float(pred.set_index("id").loc[squad_ids]["price"].sum()) if len(squad_ids)==15 else 0.0
+    # --- build nice labels keyed by ID (no collisions) ---
+    def label_for_row(r):
+        # ID is kept internal; format_func shows only label
+        return f"{r['web_name']} ({r['name']}, {r['pos']}, {r['price']:.1f})"
+    
+    opts = pred[["id","web_name","name","pos","price"]].copy()
+    label_map = {int(r.id): label_for_row(r) for r in opts.itertuples(index=False)}
+    
+    # Multiselect over IDs; Streamlit shows labels via format_func
+    squad_ids = st.multiselect(
+        "Select exactly 15 players from your current squad",
+        options=list(label_map.keys()),              # list of player IDs
+        format_func=lambda pid: label_map.get(int(pid), str(pid)),
+        max_selections=15
+    )
+    
+    current_cost = float(pred.set_index("id").loc[squad_ids]["price"].sum()) if len(squad_ids)==15 else 0.0
 
 
     # Compute current cost & ask bank

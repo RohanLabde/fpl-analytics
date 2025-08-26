@@ -87,7 +87,7 @@ if not pred.empty:
         return f"{row['web_name']} ({row['name']}, {row['pos']}, {row['price']:.1f})"
 
     opts = pred[["id","web_name","name","pos","price"]].copy()
-    label_map = {int(idx): label_for_row(row) for idx, row in opts.iterrows()}
+    label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}  # <-- use row['id']
 
     # Multiselect over IDs; show labels via format_func
     squad_ids = st.multiselect(
@@ -97,7 +97,11 @@ if not pred.empty:
         max_selections=15
     )
 
+    # Show current squad cost (only when exactly 15 are picked)
     current_cost = float(pred.set_index("id").loc[squad_ids]["price"].sum()) if len(squad_ids) == 15 else 0.0
+    if current_cost and len(squad_ids) == 15:
+        st.caption(f"Approx current squad cost: **{current_cost:.1f}**")
+
     bank = st.number_input(
         "Bank (money in the bank)",
         min_value=0.0, max_value=20.0, value=0.0, step=0.1,

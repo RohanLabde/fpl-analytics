@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-# --- absolute imports (important on Render) ---
+# --- absolute imports (Render-safe) ---
 from fpl_tool.data import load_all, next_deadline_ist
 from fpl_tool.features import build_player_master, fixture_softness
 from fpl_tool.model import baseline_expected_points
@@ -82,12 +82,12 @@ st.subheader("🧩 Analyze My 15-man Squad")
 st.caption("Pick your current 15 players, set your bank (FPL money in the bank), and we’ll pick a best XI, captain/vice, and suggest transfers.")
 
 if not pred.empty:
-    # Build label map keyed by player ID (avoids collisions)
-    def label_for_row(r):
-        return f"{r['web_name']} ({r['name']}, {r['pos']}, {r['price']:.1f})"
+    # Build label map keyed by player ID (avoids collisions). Use iterrows() to access by column names.
+    def label_for_row(row: pd.Series) -> str:
+        return f"{row['web_name']} ({row['name']}, {row['pos']}, {row['price']:.1f})"
 
     opts = pred[["id","web_name","name","pos","price"]].copy()
-    label_map = {int(r.id): label_for_row(r) for r in opts.itertuples(index=False)}
+    label_map = {int(idx): label_for_row(row) for idx, row in opts.iterrows()}
 
     # Multiselect over IDs; show labels via format_func
     squad_ids = st.multiselect(

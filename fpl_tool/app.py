@@ -82,22 +82,27 @@ st.subheader("🧩 Analyze My 15-man Squad")
 st.caption("Pick your current 15 players, set your bank (FPL money in the bank), and we’ll pick a best XI, captain/vice, and suggest transfers.")
 
 if not pred.empty:
-    # Build label map keyed by player ID (avoids collisions). Use iterrows() to access by column names.
+    # --- labels keyed by ID (no collisions) ---
     def label_for_row(row: pd.Series) -> str:
         return f"{row['web_name']} ({row['name']}, {row['pos']}, {row['price']:.1f})"
 
     opts = pred[["id","web_name","name","pos","price"]].copy()
-    label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}  # <-- use row['id']
+    label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}
 
-    # Multiselect over IDs; show labels via format_func
+    # Multiselect over IDs without a hard cap; show a live counter instead
     squad_ids = st.multiselect(
-        "Select exactly 15 players from your current squad",
+        "Select your 15 players",
         options=list(label_map.keys()),
         format_func=lambda pid: label_map.get(int(pid), str(pid)),
-        max_selections=15
+        key="squad_ids"
     )
 
-    # Show current squad cost (only when exactly 15 are picked)
+    st.caption(f"Selected **{len(squad_ids)}/15** players")
+    if st.button("Clear selection"):
+        st.session_state["squad_ids"] = []
+        st.stop()
+
+    # Show approx current cost only when exactly 15 are picked
     current_cost = float(pred.set_index("id").loc[squad_ids]["price"].sum()) if len(squad_ids) == 15 else 0.0
     if current_cost and len(squad_ids) == 15:
         st.caption(f"Approx current squad cost: **{current_cost:.1f}**")
@@ -111,53 +116,58 @@ if not pred.empty:
     if st.button("Analyze my squad"):
         if len(squad_ids) != 15:
             st.error("Please select exactly 15 players.")
+            st.stop()
+
+        if len(set(squad_ids)) != 15:
+            st.error("Duplicate players selected. Please ensure all 15 are unique.")
+            st.stop()
+
+        xi, bench = best_starting_xi(pred, squad_ids)
+        if xi.empty:
+            st.error("Could not build a valid XI. Ensure you have at least 1 GKP, 3 DEF, 2 MID, 1 FWD.")
         else:
-            xi, bench = best_starting_xi(pred, squad_ids)
-            if xi.empty:
-                st.error("Could not build a valid XI. Ensure you have at least 1 GKP, 3 DEF, 2 MID, 1 FWD.")
+            cap, vc = suggest_captain(xi)
+            st.success(f"✅ Best XI total xPts: {xi['xPts'].sum():.2f}")
+            st.write("**Best XI (sorted by xPts):**")
+            st.dataframe(xi[["web_name","pos","name","price","xPts"]].reset_index(drop=True))
+            st.write("**Bench (by xPts):**")
+            st.dataframe(bench[["web_name","pos","name","price","xPts"]].reset_index(drop=True))
+
+            if cap is not None:
+                st.info(f"🧢 **Captain:** {cap['web_name']}  |  🎖️ **Vice:** {vc['web_name'] if vc is not None else '—'}")
+
+            st.markdown("---")
+            st.markdown("### 🔁 Transfer suggestions")
+
+            one = best_single_transfer(pred, squad_ids, bank)
+            if one:
+                out_p = pred.set_index("id").loc[one["out_id"]]
+                in_p  = pred.set_index("id").loc[one["in_id"]]
+                st.write(
+                    f"**Best 1 transfer**:  {out_p['web_name']} ➜ {in_p['web_name']}  "
+                    f"|  ΔxPts: **+{one['delta']:.2f}**  | New XI xPts: {one['new_pts']:.2f}"
+                )
+                st.caption(
+                    f"Cost: from {out_p['price']:.1f} to {in_p['price']:.1f} "
+                    f"(new squad cost ≈ {one['new_cost']:.1f}, bank used ≤ {bank:.1f})"
+                )
             else:
-                cap, vc = suggest_captain(xi)
-                st.success(f"✅ Best XI total xPts: {xi['xPts'].sum():.2f}")
-                st.write("**Best XI (sorted by xPts):**")
-                st.dataframe(xi[["web_name","pos","name","price","xPts"]].reset_index(drop=True))
-                st.write("**Bench (by xPts):**")
-                st.dataframe(bench[["web_name","pos","name","price","xPts"]].reset_index(drop=True))
+                st.warning("No positive 1-transfer upgrade found within your bank and team limits.")
 
-                if cap is not None:
-                    st.info(f"🧢 **Captain:** {cap['web_name']}  |  🎖️ **Vice:** {vc['web_name'] if vc is not None else '—'}")
-
-                st.markdown("---")
-                st.markdown("### 🔁 Transfer suggestions")
-
-                one = best_single_transfer(pred, squad_ids, bank)
-                if one:
-                    out_p = pred.set_index("id").loc[one["out_id"]]
-                    in_p  = pred.set_index("id").loc[one["in_id"]]
+            try_two = st.checkbox("Also try 2-transfers (slower)", value=False)
+            if try_two:
+                two = best_double_transfer(pred, squad_ids, bank, top_pool_per_pos=25)
+                if two:
+                    out1, out2 = two["outs"]; in1, in2 = two["ins"]
+                    o1 = pred.set_index("id").loc[out1]; o2 = pred.set_index("id").loc[out2]
+                    i1 = pred.set_index("id").loc[in1]; i2 = pred.set_index("id").loc[in2]
                     st.write(
-                        f"**Best 1 transfer**:  {out_p['web_name']} ➜ {in_p['web_name']}  "
-                        f"|  ΔxPts: **+{one['delta']:.2f}**  | New XI xPts: {one['new_pts']:.2f}"
+                        f"**Best 2 transfers**:  {o1['web_name']} & {o2['web_name']} ➜ "
+                        f"{i1['web_name']} & {i2['web_name']}  |  ΔxPts: **+{two['delta']:.2f}**  "
+                        f"| New XI xPts: {two['new_pts']:.2f}"
                     )
-                    st.caption(
-                        f"Cost: from {out_p['price']:.1f} to {in_p['price']:.1f} "
-                        f"(new squad cost ≈ {one['new_cost']:.1f}, bank used ≤ {bank:.1f})"
-                    )
+                    st.caption(f"New squad cost ≈ {two['new_cost']:.1f} (bank used ≤ {bank:.1f})")
                 else:
-                    st.warning("No positive 1-transfer upgrade found within your bank and team limits.")
-
-                try_two = st.checkbox("Also try 2-transfers (slower)", value=False)
-                if try_two:
-                    two = best_double_transfer(pred, squad_ids, bank, top_pool_per_pos=25)
-                    if two:
-                        out1, out2 = two["outs"]; in1, in2 = two["ins"]
-                        o1 = pred.set_index("id").loc[out1]; o2 = pred.set_index("id").loc[out2]
-                        i1 = pred.set_index("id").loc[in1]; i2 = pred.set_index("id").loc[in2]
-                        st.write(
-                            f"**Best 2 transfers**:  {o1['web_name']} & {o2['web_name']} ➜ "
-                            f"{i1['web_name']} & {i2['web_name']}  |  ΔxPts: **+{two['delta']:.2f}**  "
-                            f"| New XI xPts: {two['new_pts']:.2f}"
-                        )
-                        st.caption(f"New squad cost ≈ {two['new_cost']:.1f} (bank used ≤ {bank:.1f})")
-                    else:
-                        st.warning("No positive 2-transfer upgrade found within your bank/team caps (with the small search pool).")
+                    st.warning("No positive 2-transfer upgrade found within your bank/team caps (with the small search pool).")
 else:
     st.info("Predictions table is empty. Reload the app.")

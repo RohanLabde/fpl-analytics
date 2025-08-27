@@ -22,7 +22,7 @@ st.set_page_config(page_title="FPL Analytics – Fast Decisions", layout="wide")
 st.title("⚽ FPL Analytics – Fast Decisions")
 st.caption(
     "Data: Official Fantasy Premier League API. "
-    "V2 adds minutes + Poisson clean sheets + attacking proxy, and now supports a manual fixture horizon."
+    "V2 adds minutes + Poisson clean sheets + attacking proxy, and supports a manual fixture horizon."
 )
 
 # -----------------------
@@ -80,20 +80,25 @@ if use_v2:
 else:
     pred = baseline_expected_points(pm, events, soft, horizon=horizon, alpha=alpha, beta=beta, gamma=gamma)
 
+# --- normalize columns for display (fixes KeyError: ['sel'] not in index) ---
+if "sel" not in pred.columns and "selected_by_percent" in pred.columns:
+    pred["sel"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0.0)
+
+DISPLAY_COLS = ["web_name", "pos", "name", "price", "sel", "xPts", "xPts_per_m"]
+cols = [c for c in DISPLAY_COLS if c in pred.columns]
+
 # -----------------------
 # Captaincy / Value tables
 # -----------------------
 st.subheader("🎯 Captaincy picks (Top 15 by xPts)")
 if not pred.empty:
-    cols = ["web_name","pos","name","price","sel","xPts","xPts_per_m"]
     st.dataframe(pred[cols].head(15).reset_index(drop=True))
 else:
     st.warning("No prediction data available yet. Please try refreshing.")
 
 st.subheader("💼 Value picks (Top 15 by xPts per million)")
 if not pred.empty:
-    cols = ["web_name","pos","name","price","sel","xPts","xPts_per_m"]
-    st.dataframe(pred[cols].sort_values("xPts_per_m", ascending=False).head(15).reset_index(drop=True))
+    st.dataframe(pred.sort_values("xPts_per_m", ascending=False)[cols].head(15).reset_index(drop=True))
 
 # -----------------------
 # 15-man greedy optimizer

@@ -260,3 +260,91 @@ def best_double_transfer(pred_df, squad_ids, bank, top_pool_per_pos=30):
         "base_pts": round(base_pts, 3),
     }
 
+import itertools
+import pandas as pd
+
+def best_transfers_given_out(pred_df, squad_ids, out_ids, bank, top_pool_per_pos=30):
+    """
+    User-chosen outs (1–3). Find best same-position replacements (cartesian search over small, high-quality pools).
+    Constraints:
+      - Budget: new_total_cost <= current_total_cost + bank
+      - Team cap: max 3 per real team
+      - Valid XI after transfers (via best_starting_xi)
+    Returns None if no positive upgrade is found.
+    """
+    if not out_ids:
+        return None
+
+    df = pred_df.set_index("id", drop=False).copy()
+    # sanity: keep only outs that are actually in the squad
+    out_ids = [int(x) for x in out_ids if int(x) in squad_ids]
+    if len(out_ids) == 0:
+        return None
+
+    # Current squad & cost
+    squad = df.loc[squad_ids].copy()
+    current_cost = float(squad["price"].sum())
+    budget_cap   = current_cost + float(bank)
+
+    # Baseline XI points for the *current* squad
+    base_xi, _ = best_starting_xi(pred_df, squad_ids)
+    if base_xi.empty:
+        return None
+    base_pts = float(base_xi["xPts"].sum())
+
+    # Build candidate pools for each outgoing player, same position
+    pools = []
+    for out_id in out_ids:
+        out_row = df.loc[out_id]
+        pos = out_row["pos"]
+        pool = df[(df["pos"] == pos) & (~df.index.isin(squad_ids))] \
+                .sort_values(["xPts","xPts_per_m"], ascending=[False, False]) \
+                .head(top_pool_per_pos)
+        # keep (id, price) to speed checks
+        pools.append(pool)
+
+    best = None  # (delta, outs, ins, new_pts, new_cost)
+
+    # Cartesian product over candidate choices, one per out_id
+    for combo in itertools.product(*[pools[i].itertuples(index=False) for i in range(len(pools))]):
+        in_ids = [int(c.id) for c in combo]
+        # Must be all distinct
+        if len(set(in_ids)) != len(in_ids):
+            continue
+
+        # Cost check
+        price_out = float(df.loc[out_ids]["price"].sum())
+        price_in  = float(df.loc[in_ids]["price"].sum())
+        new_cost  = current_cost - price_out + price_in
+        if new_cost > budget_cap:
+            continue
+
+        # Build hypothetical new squad
+        new_squad_ids = [pid for pid in squad_ids if pid not in out_ids] + in_ids
+        tmp_df = df.loc[new_squad_ids]
+        # Team cap check
+        if not (tmp_df.groupby("team").size() <= 3).all():
+            continue
+
+        # Valid XI check
+        new_xi, _ = best_starting_xi(pred_df, new_squad_ids)
+        if new_xi.empty:
+            continue
+
+        new_pts = float(new_xi["xPts"].sum())
+        delta   = new_pts - base_pts
+        if (best is None) or (delta > best[0]):
+            best = (delta, tuple(out_ids), tuple(in_ids), new_pts, round(new_cost, 1))
+
+    if not best or best[0] <= 0:
+        return None
+
+    return {
+        "delta": round(best[0], 3),
+        "outs":  list(best[1]),
+        "ins":   list(best[2]),
+        "new_pts": round(best[3], 3),
+        "new_cost": best[4],
+        "base_pts": round(base_pts, 3),
+    }
+

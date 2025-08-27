@@ -1,13 +1,9 @@
 import numpy as np
 import pandas as pd
 
-# V2 helpers (minutes + Poisson model) come from features.py
 from fpl_tool.features import simple_expected_goals, status_to_start_prob
 
 
-# ---------------------------
-# Utilities
-# ---------------------------
 def _safe_norm(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(series, errors="coerce").astype(float)
     mn, mx = s.min(), s.max()
@@ -17,7 +13,7 @@ def _safe_norm(series: pd.Series) -> pd.Series:
 
 
 # ---------------------------
-# V1 (baseline) — kept for toggle/back-compat
+# V1 baseline (kept for the toggle)
 # ---------------------------
 def baseline_expected_points(
     players_df: pd.DataFrame,
@@ -28,15 +24,11 @@ def baseline_expected_points(
     beta: float = 0.2,
     gamma: float = 0.1,
 ) -> pd.DataFrame:
-    """
-    Simple blend: form + minutes + inverse fixture 'softness'.
-    """
     if players_df is None or players_df.empty:
         return pd.DataFrame()
 
     df = players_df.copy()
 
-    # Determine next GW
     try:
         if "is_next" in events.columns and (events["is_next"] == True).any():
             next_gw = int(events.loc[events["is_next"] == True, "id"].iloc[0])
@@ -47,12 +39,10 @@ def baseline_expected_points(
     except Exception:
         next_gw = 1
 
-    # Core features
     df["form"] = pd.to_numeric(df.get("form", 0), errors="coerce").fillna(0.0)
     df["mins"] = pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0.0)
     df["mins_norm"] = _safe_norm(df["mins"])
 
-    # Fixture softness (lower is harder; invert for easier = higher)
     fdr_vals = []
     for _, r in df.iterrows():
         team_id = r.get("team", None)
@@ -63,26 +53,20 @@ def baseline_expected_points(
     df["fdr_raw"] = pd.Series(fdr_vals, index=df.index).fillna(3.0)
     df["fdr_norm_inv"] = 1.0 - _safe_norm(df["fdr_raw"])
 
-    # Position mapping
     pos_map = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
     df["pos"] = df.get("pos").fillna(df.get("element_type", 0).map(pos_map))
 
-    # xPts blend
     df["xPts"] = alpha * df["form"] + beta * df["mins_norm"] + gamma * df["fdr_norm_inv"]
-
-    # Modest priors by position
     pos_adj = {"GKP": 0.15, "DEF": 0.10, "MID": 0.05, "FWD": 0.00}
     df["xPts"] = df.apply(lambda r: r["xPts"] + pos_adj.get(str(r["pos"]), 0.0), axis=1)
 
-    # Value metric
     df["price"] = pd.to_numeric(df.get("price", df.get("now_cost", 0) / 10.0), errors="coerce").fillna(0.0)
     df["xPts_per_m"] = df["xPts"] / df["price"].replace(0, np.nan)
-
     return df.sort_values("xPts", ascending=False)
 
 
 # ---------------------------
-# V2 — Minutes + Poisson clean sheets + attacking proxy (scaled)
+# V2 — Minutes + Poisson + scaled attacking (FIXED minutes & CS)
 # ---------------------------
 def expected_points_v2(
     players_df: pd.DataFrame,
@@ -94,29 +78,41 @@ def expected_points_v2(
     w_bonus: float = 0.2,
 ) -> pd.DataFrame:
     """
-    V2 xPts (scaled to realistic 0–10 per match):
-      • Minutes: start probability -> p60 (probability to reach 60’)
-      • Team context: expected goals for & against from a tiny Poisson prep
-      • Clean sheets (GKP/DEF): P(goals_conceded = 0)
-      • Attacking proxy: per-90 goals/assists + ICT, scaled down and by team xG
-      • Bonus proxy: small scaled bonus/BPS/ICT signal
+    V2 xPts (0–12 typical):
+      • p60 = min(start_prob*0.9, season minutes ratio)
+      • CS points require p60 (players must likely reach 60')
+      • Attacking & bonus are scaled by minutes share and team xG
     """
     if players_df is None or players_df.empty:
         return pd.DataFrame()
 
     df = players_df.copy()
 
-    # --- match context per team (expected goals for/against)
-    ctx = simple_expected_goals(fixtures, events)  # {team: {lam_for, lam_against, is_home, opp}}
+    # --- per-team expected goals (for & against) for next GW
+    ctx = simple_expected_goals(fixtures, events)  # {team: {lam_for, lam_against, ...}}
 
-    # --- start probability -> p60 (probability to play 60+)
-    start_probs = []
+    # --- finished GWs -> minutes share
+    try:
+        finished_gws = int(events["finished"].sum()) if "finished" in events.columns else int(events["id"].max() - 1)
+    except Exception:
+        finished_gws = 1
+    finished_gws = max(1, finished_gws)
+    denom_mins = finished_gws * 90.0  # ignores DGWs by design (simple & safe)
+
+    # --- start probability -> p60 (gated by minutes share)
     st_col = df.get("status", "a")
     cnr_col = df.get("chance_of_playing_next_round", np.nan)
-    for st, cnr in zip(st_col, cnr_col):
-        start_probs.append(status_to_start_prob(st, cnr))
+    start_probs = [status_to_start_prob(st, cnr) for st, cnr in zip(st_col, cnr_col)]
     df["start_prob"] = start_probs
-    df["p60"] = df["start_prob"] * 0.9  # starters average ~81 mins → use 0.9 as a simple proxy
+
+    df["minutes"] = pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0.0)
+    df["mins_ratio"] = np.clip(df["minutes"] / max(1.0, denom_mins), 0.0, 1.0)
+
+    # Popularity dampener (tiny): very low selected% -> slightly lower p60
+    sel = pd.to_numeric(df.get("selected_by_percent", 0), errors="coerce").fillna(0.0) / 100.0
+    sel_adj = 0.25 + 0.75 * np.clip(sel, 0.0, 1.0)  # in [0.25, 1]
+
+    df["p60"] = np.minimum(np.array(df["start_prob"]) * 0.9 * sel_adj, df["mins_ratio"])
 
     # --- team lambdas for each player ---
     lam_for, lam_against = [], []
@@ -127,20 +123,20 @@ def expected_points_v2(
     df["lam_for"] = lam_for
     df["lam_against"] = lam_against
 
-    # --- clean sheet probability (Poisson: P(X=0) with X ~ Poisson(lam_against))
+    # --- clean sheet probability & component (requires 60')
     df["cs_prob"] = np.exp(-df["lam_against"])
-
-    # --- per-90 attacking proxy (scaled) ---
-    # Map position if needed
     if "pos" not in df.columns:
         pos_map = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
         df["pos"] = df.get("element_type", 0).map(pos_map)
+    cs_points_by_pos = df["pos"].map({"GKP": 4.0, "DEF": 4.0}).fillna(0.0)
+    df["cs_component"] = w_cs * df["cs_prob"] * cs_points_by_pos * df["p60"]  # <-- multiply by p60
 
+    # --- per-90 attacking proxy (scaled) ---
     goal_pts_map = {"GKP": 6.0, "DEF": 6.0, "MID": 5.0, "FWD": 4.0}
     goal_pts = df["pos"].map(goal_pts_map).fillna(4.0)
     assist_pts = 3.0
 
-    mins = pd.to_numeric(df.get("minutes", 0), errors="coerce").replace(0, np.nan)
+    mins = df["minutes"].replace(0, np.nan)
     g_p90 = pd.to_numeric(df.get("goals_scored", 0), errors="coerce") / mins * 90.0
     a_p90 = pd.to_numeric(df.get("assists", 0), errors="coerce") / mins * 90.0
     g_p90 = g_p90.fillna(0.0)
@@ -149,46 +145,35 @@ def expected_points_v2(
     ict = pd.to_numeric(df.get("ict_index", 0), errors="coerce").fillna(0.0)
     ict_norm = (ict - ict.min()) / (ict.max() - ict.min() + 1e-9)
 
-    # raw attacking points per 90 (unscaled)
     atk_raw = (g_p90 * goal_pts) + (a_p90 * assist_pts) + 0.5 * ict_norm
-
-    # ---- scaling to keep xPts realistic ----
-    # This keeps typical attackers around ~0.2–0.6 attacking points per 90 before minutes/team scaling.
     atk_scaled = atk_raw / 10.0
 
-    # combine: minutes (p60) × team xG × scaled per90
-    df["atk_component"] = w_attack * df["p60"] * df["lam_for"] * atk_scaled
+    # scale by team xG, probability to play and minutes share
+    df["atk_component"] = (
+        w_attack * df["lam_for"] * df["p60"] * df["mins_ratio"] * atk_scaled
+    )
 
-    # --- appearance points (2 if 60+ very likely)
+    # --- appearance points (2 if likely 60+)
     df["appear_pts"] = df["p60"] * 2.0
 
-    # --- clean sheet component (GKP/DEF only)
-    cs_points_by_pos = df["pos"].map({"GKP": 4.0, "DEF": 4.0}).fillna(0.0)
-    df["cs_component"] = w_cs * df["cs_prob"] * cs_points_by_pos
+    # --- tiny saves proxy for GK (needs minutes)
+    df["gk_saves_proxy"] = np.where(df["pos"] == "GKP", (1.0 - df["cs_prob"]) * 0.5 * df["p60"], 0.0)
 
-    # --- tiny saves proxy for GK (more saves when CS_prob is low)
-    df["gk_saves_proxy"] = np.where(df["pos"] == "GKP", (1.0 - df["cs_prob"]) * 0.5, 0.0)
-
-    # --- bonus proxy (scaled down)
+    # --- bonus proxy (scaled & minutes-weighted)
     bps = pd.to_numeric(df.get("bps", 0), errors="coerce").fillna(0.0)
     bps_p90 = (bps / mins * 90.0).fillna(0.0)
     bonus_proxy = (bps_p90 + ict_norm) / 2.0
-    df["bonus_component"] = w_bonus * (bonus_proxy / 10.0)
+    df["bonus_component"] = w_bonus * (bonus_proxy / 10.0) * df["mins_ratio"]
 
-    # --- total xPts (V2) ---
-    df["xPts_v2"] = (
-        df["appear_pts"]
-        + df["cs_component"]
-        + df["gk_saves_proxy"]
-        + df["atk_component"]
-        + df["bonus_component"]
-    )
+    # --- final xPts ---
+    df["xPts_v2"] = df["appear_pts"] + df["cs_component"] + df["gk_saves_proxy"] + df["atk_component"] + df["bonus_component"]
 
-    # Value metric
-    df["price"] = pd.to_numeric(df.get("price", df.get("now_cost", 0) / 10.0), errors="coerce").fillna(0.0)
-    df["xPts_v2_per_m"] = df["xPts_v2"] / df["price"].replace(0, np.nan)
+    # Value per million (safe)
+    df["price"] = pd.to_numeric(df.get("price", df.get("now_cost", 0) / 10.0), errors="coerce")
+    df["price"] = df["price"].where(df["price"] > 0, np.nan)
+    df["xPts_v2_per_m"] = (df["xPts_v2"] / df["price"]).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(0, 3.0)
 
-    # Sanity clip (optional): cap at 0–20 to avoid junk outliers
-    df["xPts_v2"] = df["xPts_v2"].clip(lower=0.0, upper=20.0)
+    # Clip xPts to avoid freak outliers
+    df["xPts_v2"] = df["xPts_v2"].clip(lower=0.0, upper=12.0)
 
     return df.sort_values("xPts_v2", ascending=False)

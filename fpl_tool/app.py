@@ -15,7 +15,7 @@ from fpl_tool.optimizer import (
 
 st.set_page_config(page_title="FPL Analytics – Render Free", layout="wide")
 
-st.title("⚽ FPL Analytics – Fast Decisions (Free)")
+st.title("⚽ FPL Analytics ")
 st.caption("Data: Official Fantasy Premier League API. Uses form, minutes, and fixture softness.")
 
 # -----------------------
@@ -171,3 +171,36 @@ if not pred.empty:
                     st.warning("No positive 2-transfer upgrade found within your bank/team caps (with the small search pool).")
 else:
     st.info("Predictions table is empty. Reload the app.")
+
+# --- User-chosen outs -> best suggestions ---
+st.markdown("---")
+st.markdown("### 🎯 Pick players to transfer OUT (we’ll suggest the best replacements)")
+
+# Only offer choices from the selected squad
+id_to_label = {pid: label_map[pid] for pid in squad_ids if pid in label_map}
+chosen_outs = st.multiselect(
+    "Choose 1–3 players to sell",
+    options=list(id_to_label.keys()),
+    format_func=lambda pid: id_to_label.get(int(pid), str(pid)),
+    max_selections=3
+)
+
+if st.button("Suggest replacements for my outs"):
+    if len(squad_ids) != 15:
+        st.error("Select exactly 15 players in your squad first.")
+    elif len(chosen_outs) == 0:
+        st.warning("Pick at least 1 player to sell.")
+    else:
+        from fpl_tool.optimizer import best_transfers_given_out
+        res = best_transfers_given_out(pred, squad_ids, chosen_outs, bank, top_pool_per_pos=30)
+        if not res:
+            st.warning("No positive upgrade found within bank/team caps for the selected outs.")
+        else:
+            st.success(f"ΔxPts vs current XI: **+{res['delta']:.2f}**  |  New XI xPts: {res['new_pts']:.2f}")
+            # Pretty print outs/ins
+            pidx = pred.set_index("id")
+            outs_labels = " & ".join(pidx.loc[_id]["web_name"] for _id in res["outs"])
+            ins_labels  = " & ".join(pidx.loc[_id]["web_name"] for _id in res["ins"])
+            st.write(f"**Sell:** {outs_labels}")
+            st.write(f"**Buy:** {ins_labels}")
+            st.caption(f"New squad cost ≈ {res['new_cost']:.1f} (bank used ≤ {bank:.1f})")

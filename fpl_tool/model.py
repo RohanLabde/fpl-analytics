@@ -28,7 +28,7 @@ def baseline_expected_points(
     alpha: float = 0.7,
     beta: float = 0.2,
     gamma: float = 0.1,
-) -> pd.DataFrame]:
+) -> pd.DataFrame:
     if players_df is None or players_df.empty:
         return pd.DataFrame()
 

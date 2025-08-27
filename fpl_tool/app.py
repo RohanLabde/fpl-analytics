@@ -6,7 +6,7 @@ from fpl_tool.data import load_all, next_deadline_ist
 from fpl_tool.features import build_player_master, fixture_softness
 from fpl_tool.model import (
     baseline_expected_points,
-    expected_points_v2,   # NEW: V2 scorer (Poisson + minutes + roles)
+    expected_points_v2,   # V2 scorer (minutes + Poisson + attacking proxy)
 )
 from fpl_tool.optimizer import (
     pick_squad_greedy,
@@ -14,10 +14,10 @@ from fpl_tool.optimizer import (
     suggest_captain,
     best_single_transfer,
     best_double_transfer,
-    best_transfers_given_out,  # if you added the “pick my outs” feature
+    best_transfers_given_out,  # user-chosen outs helper
 )
 
-st.set_page_config(page_title="FPL Analytics – Render Free", layout="wide")
+st.set_page_config(page_title="FPL Analytics – Fast Decisions", layout="wide")
 
 st.title("⚽ FPL Analytics – Fast Decisions")
 st.caption("Data: Official Fantasy Premier League API. Toggle V2 for smarter xPts (minutes + Poisson clean sheets + attacking proxy).")
@@ -117,7 +117,7 @@ if not pred.empty:
     )
 
     st.caption(f"Selected **{len(squad_ids)}/15** players")
-    if st.button("Clear selection"):
+    if st.button("Clear selection", key="clear_squad"):
         st.session_state["squad_ids"] = []
         st.stop()
 
@@ -132,15 +132,22 @@ if not pred.empty:
         help="Enter your available funds. We assume selling price ≈ current price for now."
     )
 
-    if st.button("Analyze my squad"):
+    # latch analysis view across reruns
+    if "show_analysis" not in st.session_state:
+        st.session_state.show_analysis = False
+
+    if st.button("Analyze my squad", key="analyze_btn"):
         if len(squad_ids) != 15:
             st.error("Please select exactly 15 players.")
-            st.stop()
-
-        if len(set(squad_ids)) != 15:
+            st.session_state.show_analysis = False
+        elif len(set(squad_ids)) != 15:
             st.error("Duplicate players selected. Please ensure all 15 are unique.")
-            st.stop()
+            st.session_state.show_analysis = False
+        else:
+            st.session_state.show_analysis = True
 
+    # -------- Render analysis (persists across reruns) --------
+    if st.session_state.show_analysis and len(squad_ids) == 15:
         xi, bench = best_starting_xi(pred, squad_ids)
         if xi.empty:
             st.error("Could not build a valid XI. Ensure you have at least 1 GKP, 3 DEF, 2 MID, 1 FWD.")
@@ -156,12 +163,13 @@ if not pred.empty:
                 st.info(f"🧢 **Captain:** {cap['web_name']}  |  🎖️ **Vice:** {vc['web_name'] if vc is not None else '—'}")
 
             st.markdown("---")
-            st.markdown("### 🔁 Transfer suggestions")
+            st.markdown("### 🔁 Transfer suggestions (auto)")
 
             one = best_single_transfer(pred, squad_ids, bank)
             if one:
-                out_p = pred.set_index("id").loc[one["out_id"]]
-                in_p  = pred.set_index("id").loc[one["in_id"]]
+                pidx = pred.set_index("id")
+                out_p = pidx.loc[one["out_id"]]
+                in_p  = pidx.loc[one["in_id"]]
                 st.write(
                     f"**Best 1 transfer**:  {out_p['web_name']} ➜ {in_p['web_name']}  "
                     f"|  ΔxPts: **+{one['delta']:.2f}**  | New XI xPts: {one['new_pts']:.2f}"
@@ -173,12 +181,12 @@ if not pred.empty:
             else:
                 st.warning("No positive 1-transfer upgrade found within your bank and team limits.")
 
-            try_two = st.checkbox("Also try 2-transfers (slower)", value=False)
+            try_two = st.checkbox("Also try 2-transfers (slower)", value=False, key="try_two")
             if try_two:
                 two = best_double_transfer(pred, squad_ids, bank, top_pool_per_pos=25)
                 if two:
-                    out1, out2 = two["outs"]; in1, in2 = two["ins"]
                     pidx = pred.set_index("id")
+                    out1, out2 = two["outs"]; in1, in2 = two["ins"]
                     o1 = pidx.loc[out1]; o2 = pidx.loc[out2]
                     i1 = pidx.loc[in1]; i2 = pidx.loc[in2]
                     st.write(
@@ -190,31 +198,38 @@ if not pred.empty:
                 else:
                     st.warning("No positive 2-transfer upgrade found within your bank/team caps (with the small search pool).")
 
-            # --- Optional: user-chosen outs -> best suggestions (if you added the function) ---
-            st.markdown("---")
-            st.markdown("### 🎯 Pick players to transfer OUT (we’ll suggest the best replacements)")
-            id_to_label = {pid: label_map[pid] for pid in squad_ids if pid in label_map}
-            chosen_outs = st.multiselect(
-                "Choose 1–3 players to sell",
-                options=list(id_to_label.keys()),
-                format_func=lambda pid: id_to_label.get(int(pid), str(pid)),
-                max_selections=3,
-                key="chosen_outs"
-            )
-            if st.button("Suggest replacements for my outs"):
-                if len(chosen_outs) == 0:
-                    st.warning("Pick at least 1 player to sell.")
+    # --------------- USER-CHOSEN OUTS (ALWAYS OUTSIDE THE BUTTON) ---------------
+    st.markdown("---")
+    st.markdown("### 🎯 Pick players to transfer OUT (we’ll suggest the best replacements)")
+
+    if len(squad_ids) != 15:
+        st.info("Select exactly 15 players above to get transfer suggestions.")
+    else:
+        id_to_label = {pid: label_map[pid] for pid in squad_ids if pid in label_map}
+
+        chosen_outs = st.multiselect(
+            "Choose 1–3 players to sell",
+            options=list(id_to_label.keys()),
+            format_func=lambda pid: id_to_label.get(int(pid), str(pid)),
+            max_selections=3,
+            key="chosen_outs",
+        )
+
+        if st.button("Suggest replacements for my outs", key="suggest_outs"):
+            if not chosen_outs:
+                st.warning("Pick at least 1 player to sell.")
+            else:
+                res = best_transfers_given_out(pred, squad_ids, chosen_outs, bank, top_pool_per_pos=30)
+                if not res:
+                    st.warning("No positive upgrade found within bank/team caps for the selected outs.")
                 else:
-                    res = best_transfers_given_out(pred, squad_ids, chosen_outs, bank, top_pool_per_pos=30)
-                    if not res:
-                        st.warning("No positive upgrade found within bank/team caps for the selected outs.")
-                    else:
-                        st.success(f"ΔxPts vs current XI: **+{res['delta']:.2f}**  |  New XI xPts: {res['new_pts']:.2f}")
-                        pidx = pred.set_index("id")
-                        outs_labels = " & ".join(pidx.loc[_id]["web_name"] for _id in res["outs"])
-                        ins_labels  = " & ".join(pidx.loc[_id]["web_name"] for _id in res["ins"])
-                        st.write(f"**Sell:** {outs_labels}")
-                        st.write(f"**Buy:** {ins_labels}")
-                        st.caption(f"New squad cost ≈ {res['new_cost']:.1f} (bank used ≤ {bank:.1f})")
+                    st.success(f"ΔxPts vs current XI: **+{res['delta']:.2f}**  |  New XI xPts: {res['new_pts']:.2f}")
+                    pidx = pred.set_index("id")
+                    outs_labels = " & ".join(pidx.loc[_id]["web_name"] for _id in res["outs"])
+                    ins_labels  = " & ".join(pidx.loc[_id]["web_name"] for _id in res["ins"])
+                    st.write(f"**Sell:** {outs_labels}")
+                    st.write(f"**Buy:** {ins_labels}")
+                    st.caption(f"New squad cost ≈ {res['new_cost']:.1f} (bank used ≤ {bank:.1f})")
+
 else:
     st.info("Predictions table is empty. Reload the app.")

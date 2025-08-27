@@ -1,151 +1,102 @@
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 
+# ------------------------------------------------------------
+# Existing helpers you already had (we keep/extend them)
+# ------------------------------------------------------------
 def build_player_master(players, teams, positions):
-    if players is None or players.empty:
-        return pd.DataFrame()
-    teams_small = teams[["id","name","strength_overall_home","strength_overall_away"]].rename(columns={"id":"team"}) if not teams.empty else pd.DataFrame(columns=["team","name","strength_overall_home","strength_overall_away"])
-    pos_map = positions[["id","plural_name_short"]].rename(columns={"id":"element_type","plural_name_short":"pos"}) if not positions.empty else pd.DataFrame(columns=["element_type","pos"])
-    df = players.merge(teams_small, on="team", how="left").merge(pos_map, on="element_type", how="left")
-    df["price"] = df["now_cost"].fillna(0) / 10.0
-    # selected_by_percent can be string with %, ensure float
-    df["sel"] = pd.to_numeric(df.get("selected_by_percent", 0).astype(str).str.replace("%","", regex=False), errors="coerce").fillna(0.0)
+    """Return a joined player table with readable fields we use everywhere."""
+    df = players.copy()
+
+    # Normalize price, pos label, team name
+    pos_map = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
+    df["pos"] = df.get("element_type", 0).map(pos_map)
+    df["price"] = pd.to_numeric(df.get("now_cost", 0), errors="coerce").fillna(0.0) / 10.0
+    team_map = dict(zip(teams["id"], teams["name"]))
+    df["name"] = df["team"].map(team_map)
+
+    # Columns we commonly use in the app
+    keep = [
+        "id","web_name","team","name","pos","status","chance_of_playing_next_round",
+        "minutes","goals_scored","assists","bps","ict_index","selected_by_percent",
+        "now_cost"
+    ]
+    # Allow for columns missing in early runs
+    keep = [c for c in keep if c in df.columns]
+    df = df[keep]
+    df["price"] = pd.to_numeric(df.get("now_cost", 0), errors="coerce").fillna(0.0) / 10.0
+
     return df
 
+
 def fixture_softness(fixtures, teams, horizon=3):
+    """(Simple/legacy) Return a dict team_id -> {gw: softness_score} for next few GWs."""
+    # This is only used by V1; leave as-is for back-compat.
+    out = {}
     if fixtures is None or fixtures.empty:
-        return {}
-    f = fixtures.copy()
-    f["event"] = f["event"].fillna(-1).astype(int)
-    f = f[f["event"]>0]
-    if f.empty:
-        return {}
-    teams_small = teams[["id","strength_overall_home","strength_overall_away"]].copy()
-    soft = {}
-    max_gw = int(f["event"].max())
-    min_gw = int(f["event"].min())
+        return out
+    team_ids = teams["id"].tolist()
+    for t in team_ids:
+        out[t] = {}
+    # very rough: use opponent team id as proxy; smaller is "harder"
+    for _, row in fixtures.iterrows():
+        if "event" not in row or pd.isna(row["event"]):
+            continue
+        gw = int(row["event"])
+        th, ta = int(row["team_h"]), int(row["team_a"])
+        out.setdefault(th, {})[gw] = out.get(th, {}).get(gw, 0) + ta
+        out.setdefault(ta, {})[gw] = out.get(ta, {}).get(gw, 0) + th
+    return out
 
-    def opp_strength(opp_id, is_home):
-        row = teams_small[teams_small["id"]==opp_id]
-        if row.empty:
-            return 3.0
-        row = row.iloc[0]
-        return float(row["strength_overall_home"] if is_home else row["strength_overall_away"])
-
-    for tid in teams_small["id"]:
-        team_fixt = f[(f["team_h"]==tid) | (f["team_a"]==tid)].sort_values("event")
-        roll = {}
-        for gw in range(min_gw, max_gw+1):
-            nxt = team_fixt[team_fixt["event"].between(gw, gw+horizon-1)]
-            if nxt.empty:
-                roll[gw] = np.nan
-            else:
-                vals = []
-                for _, row in nxt.iterrows():
-                    is_home = (row["team_h"]==tid)
-                    opp = int(row["team_a"] if is_home else row["team_h"])
-                    vals.append(opp_strength(opp, is_home))
-                roll[gw] = float(np.mean(vals)) if len(vals)>0 else np.nan
-        soft[tid] = roll
-    return soft
-
-import numpy as np
-import pandas as pd
-
+# ------------------------------------------------------------
+# Minutes & Poisson helpers
+# ------------------------------------------------------------
 def _recent_team_goals(fixtures: pd.DataFrame, lookback: int = 6):
     """
-    From the fixtures table (which includes finished past games), compute
-    rolling average Goals For (GF) and Goals Against (GA) for each team
-    over the last `lookback` finished matches.
-    Returns two DataFrames: gf_avg[team_id], ga_avg[team_id]
+    From finished fixtures, compute rolling average GF/GA for each team
+    (last `lookback` matches). Fallbacks are handled in caller.
     """
     f = fixtures.copy()
-    # Keep only finished games that have scores
-    f = f[(f["finished"] == True) & f["team_h_score"].notna() & f["team_a_score"].notna()]
+    if "finished" in f.columns:
+        f = f[(f["finished"] == True) & f["team_h_score"].notna() & f["team_a_score"].notna()]
+    else:
+        f = f[f["team_h_score"].notna() & f["team_a_score"].notna()]
+
+    if f.empty:
+        return pd.Series(dtype=float), pd.Series(dtype=float)
+
     cols = ["event","team_h","team_a","team_h_score","team_a_score"]
     f = f[cols].sort_values("event")
 
-    # Home rows
     home = f[["event","team_h","team_a","team_h_score","team_a_score"]].rename(
-        columns={"team_h":"team", "team_a":"opp", "team_h_score":"gf", "team_a_score":"ga"}
+        columns={"team_h":"team","team_a":"opp","team_h_score":"gf","team_a_score":"ga"}
     )
-    # Away rows
     away = f[["event","team_h","team_a","team_h_score","team_a_score"]].rename(
-        columns={"team_a":"team", "team_h":"opp", "team_a_score":"gf", "team_h_score":"ga"}
+        columns={"team_a":"team","team_h":"opp","team_a_score":"gf","team_h_score":"ga"}
     )
     allg = pd.concat([home, away], ignore_index=True).sort_values(["team","event"])
-
-    # Rolling averages per team
-    allg["gf_roll"] = allg.groupby("team")["gf"].rolling(lookback, min_periods=1).mean().reset_index(0, drop=True)
-    allg["ga_roll"] = allg.groupby("team")["ga"].rolling(lookback, min_periods=1).mean().reset_index(0, drop=True)
+    allg["gf_roll"] = allg.groupby("team")["gf"].rolling(lookback, min_periods=1)\
+        .mean().reset_index(0, drop=True)
+    allg["ga_roll"] = allg.groupby("team")["ga"].rolling(lookback, min_periods=1)\
+        .mean().reset_index(0, drop=True)
 
     gf_avg = allg.groupby("team")["gf_roll"].last()
     ga_avg = allg.groupby("team")["ga_roll"].last()
     return gf_avg, ga_avg
 
-def next_gw_pairs(fixtures: pd.DataFrame, events: pd.DataFrame):
-    """
-    Return a DataFrame with (team_id, opp_id, is_home) for the *next* GW only.
-    Handles single fixtures (no DGW handling in V2 to keep it simple).
-    """
+
+def _next_gw(events: pd.DataFrame) -> int:
     if "is_next" in events.columns and (events["is_next"] == True).any():
-        gw = int(events.loc[events["is_next"] == True, "id"].iloc[0])
-    else:
-        # first unfinished GW, else max id
-        if "finished" in events.columns and (~events["finished"]).any():
-            gw = int(events.loc[~events["finished"], "id"].min())
-        else:
-            gw = int(events["id"].max()) if "id" in events.columns else 1
+        return int(events.loc[events["is_next"] == True, "id"].iloc[0])
+    if "finished" in events.columns and (~events["finished"]).any():
+        return int(events.loc[~events["finished"], "id"].min())
+    return int(events["id"].max()) if "id" in events.columns else 1
 
-    f = fixtures.copy()
-    f = f[(f["event"] == gw) & (f["finished"] == False)]
-    if f.empty:
-        return pd.DataFrame(columns=["team","opp","is_home"])
-
-    home = f[["team_h","team_a"]].rename(columns={"team_h":"team","team_a":"opp"})
-    home["is_home"] = True
-    away = f[["team_h","team_a"]].rename(columns={"team_a":"team","team_h":"opp"})
-    away["is_home"] = False
-    return pd.concat([home, away], ignore_index=True)
-
-def simple_expected_goals(fixtures: pd.DataFrame, events: pd.DataFrame, home_adv: float = 1.10):
-    """
-    Tiny Poisson prep:
-    - Team attacking lambda (λ_for) = recent GF
-    - Opponent defensive weakness (λ_opp_def) = opponent recent GA
-    - Expected goals for this game = sqrt(λ_for * λ_opp_def) * (home_adv if home else 1)
-    Also returns opponent's expected goals against you (for CS probability)
-    """
-    gf_avg, ga_avg = _recent_team_goals(fixtures, lookback=6)
-    pairs = next_gw_pairs(fixtures, events)
-    if pairs.empty:
-        return {}
-
-    eg = {}
-    for _, r in pairs.iterrows():
-        team = int(r["team"]); opp = int(r["opp"]); is_home = bool(r["is_home"])
-        lam_for_team = float(gf_avg.get(team, 1.2))           # fallback if no data
-        lam_opp_def  = float(ga_avg.get(opp, 1.2))
-        lam_for = np.sqrt(max(lam_for_team, 0.1) * max(lam_opp_def, 0.1))
-        if is_home:
-            lam_for *= home_adv
-
-        # opponent expected goals vs this team
-        lam_opp_att = float(gf_avg.get(opp, 1.2))
-        lam_team_def = float(ga_avg.get(team, 1.2))
-        lam_against = np.sqrt(max(lam_opp_att, 0.1) * max(lam_team_def, 0.1))
-        if not is_home:
-            lam_against *= home_adv  # they have home advantage
-
-        eg[team] = {"opp": opp, "is_home": is_home, "lam_for": lam_for, "lam_against": lam_against}
-    return eg
 
 def status_to_start_prob(status: str, chance_next_round):
     """
-    Convert FPL status/chance to a simple probability of starting.
-    status: 'a' (available), 'd' (doubtful), 'i' (injured), 's' (suspended)
-    chance_next_round: may be NaN; if provided, prefer that percent/100.
+    Convert FPL status/chance to probability of starting this match.
+    If chance% provided, prefer that.
     """
     try:
         if pd.notna(chance_next_round):
@@ -158,4 +109,58 @@ def status_to_start_prob(status: str, chance_next_round):
     if s == "a": return 0.9
     if s == "d": return 0.5
     if s in ("i","s"): return 0.1
-    return 0.7  # unknown
+    return 0.7
+
+
+# ------------------------------------------------------------
+# Horizon-aware expected goals
+# ------------------------------------------------------------
+def simple_expected_goals_horizon(
+    fixtures: pd.DataFrame,
+    events: pd.DataFrame,
+    horizon: int = 1,
+    home_adv: float = 1.10,
+):
+    """
+    Return, for each team, the MEAN expected-goals-for and expected-goals-against
+    across the next `horizon` fixtures, plus how many fixtures were found.
+    Uses recent rolling GF/GA as simple Poisson inputs.
+    """
+    if fixtures is None or fixtures.empty:
+        return {}
+
+    next_gw = _next_gw(events)
+
+    # Upcoming fixtures in [next_gw, next_gw + horizon - 1]
+    f = fixtures.copy()
+    f = f[(f["event"] >= next_gw) & (f["event"] < next_gw + horizon)]
+    if f.empty:
+        return {}
+
+    gf_avg, ga_avg = _recent_team_goals(fixtures, lookback=6)
+
+    # Build per-fixture lambdas
+    recs = []
+    for _, row in f.iterrows():
+        gw = int(row["event"])
+        th, ta = int(row["team_h"]), int(row["team_a"])
+
+        # home team expected goals
+        lam_for_h = np.sqrt(max(gf_avg.get(th, 1.2), 0.1) * max(ga_avg.get(ta, 1.2), 0.1)) * home_adv
+        lam_against_h = np.sqrt(max(gf_avg.get(ta, 1.2), 0.1) * max(ga_avg.get(th, 1.2), 0.1))
+
+        # away team expected goals
+        lam_for_a = np.sqrt(max(gf_avg.get(ta, 1.2), 0.1) * max(ga_avg.get(th, 1.2), 0.1))
+        lam_against_a = np.sqrt(max(gf_avg.get(th, 1.2), 0.1) * max(ga_avg.get(ta, 1.2), 0.1)) * home_adv
+
+        recs.append({"team": th, "lam_for": lam_for_h, "lam_against": lam_against_h})
+        recs.append({"team": ta, "lam_for": lam_for_a, "lam_against": lam_against_a})
+
+    df = pd.DataFrame(recs)
+    if df.empty:
+        return {}
+
+    agg = df.groupby("team").agg(lam_for_mean=("lam_for","mean"),
+                                 lam_against_mean=("lam_against","mean"),
+                                 n=("lam_for","count")).to_dict(orient="index")
+    return agg

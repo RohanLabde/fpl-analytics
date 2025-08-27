@@ -6,7 +6,7 @@ from fpl_tool.data import load_all, next_deadline_ist
 from fpl_tool.features import build_player_master, fixture_softness
 from fpl_tool.model import (
     baseline_expected_points,
-    expected_points_v2,   # V2 scorer (minutes + Poisson + attacking proxy)
+    expected_points_v2,   # V2 scorer (minutes + Poisson + attacking proxy, horizon-aware)
 )
 from fpl_tool.optimizer import (
     pick_squad_greedy,
@@ -20,7 +20,10 @@ from fpl_tool.optimizer import (
 st.set_page_config(page_title="FPL Analytics – Fast Decisions", layout="wide")
 
 st.title("⚽ FPL Analytics – Fast Decisions")
-st.caption("Data: Official Fantasy Premier League API. Toggle V2 for smarter xPts (minutes + Poisson clean sheets + attacking proxy).")
+st.caption(
+    "Data: Official Fantasy Premier League API. "
+    "V2 adds minutes + Poisson clean sheets + attacking proxy, and now supports a manual fixture horizon."
+)
 
 # -----------------------
 # Load + prep data
@@ -28,31 +31,39 @@ st.caption("Data: Official Fantasy Premier League API. Toggle V2 for smarter xPt
 with st.spinner("Loading latest FPL data..."):
     data = load_all()
 
-players = data["players"]
-teams = data["teams"]
-events = data["events"]
+players  = data["players"]
+teams    = data["teams"]
+events   = data["events"]
 fixtures = data["fixtures"]
 
 deadline = next_deadline_ist(events)
 if deadline:
     st.info(f"⏳ Next deadline (IST): **{deadline.strftime('%a, %d %b %Y %H:%M')}**")
 
-pm = build_player_master(players, teams, data["positions"])
-soft = fixture_softness(fixtures, teams, horizon=3)
+pm   = build_player_master(players, teams, data["positions"])
+soft = fixture_softness(fixtures, teams, horizon=3)   # legacy for V1
 
 # -----------------------
 # Sidebar controls
 # -----------------------
 st.sidebar.header("Model Settings")
 
-# V2 toggle
 use_v2 = st.sidebar.checkbox("Use V2 xPts (Poisson + minutes + roles)", value=True)
 
-# V1-only sliders (kept for backwards compatibility)
-horizon = st.sidebar.slider("Fixture horizon (matches) [V1]", 1, 5, 3)
-alpha = st.sidebar.slider("Weight: Form [V1]", 0.0, 1.5, 0.7, 0.05)
-beta  = st.sidebar.slider("Weight: Minutes [V1]", 0.0, 1.0, 0.2, 0.05)
-gamma = st.sidebar.slider("Weight: Fixture softness [V1]", 0.0, 1.0, 0.1, 0.05)
+if use_v2:
+    h2 = st.sidebar.slider("Fixture horizon (matches) [V2]", 1, 5, 1)
+    agg_choice = st.sidebar.radio(
+        "How to report over horizon",
+        ["Average per match", "Total across horizon"],
+        index=0,
+        horizontal=False,
+    )
+else:
+    # V1-only sliders
+    horizon = st.sidebar.slider("Fixture horizon (matches) [V1]", 1, 5, 3)
+    alpha   = st.sidebar.slider("Weight: Form [V1]", 0.0, 1.5, 0.7, 0.05)
+    beta    = st.sidebar.slider("Weight: Minutes [V1]", 0.0, 1.0, 0.2, 0.05)
+    gamma   = st.sidebar.slider("Weight: Fixture softness [V1]", 0.0, 1.0, 0.1, 0.05)
 
 # Budget for 15-man optimizer
 budget = st.sidebar.slider("Budget (15-man optimizer)", 90.0, 100.0, 100.0, 0.5)
@@ -61,9 +72,11 @@ budget = st.sidebar.slider("Budget (15-man optimizer)", 90.0, 100.0, 100.0, 0.5)
 # Compute predictions (V2 or V1)
 # -----------------------
 if use_v2:
-    pred = expected_points_v2(pm, teams, events, fixtures)
-    # rename for UI reuse
-    pred = pred.rename(columns={"xPts_v2": "xPts", "xPts_v2_per_m": "xPts_per_m"})
+    pred = expected_points_v2(
+        pm, teams, events, fixtures,
+        horizon=h2,
+        aggregate="total" if agg_choice.startswith("Total") else "average",
+    ).rename(columns={"xPts_v2":"xPts", "xPts_v2_per_m":"xPts_per_m"})
 else:
     pred = baseline_expected_points(pm, events, soft, horizon=horizon, alpha=alpha, beta=beta, gamma=gamma)
 
@@ -98,7 +111,7 @@ if st.button("Build 15-man Squad"):
 # Analyze My 15-man Squad
 # -----------------------
 st.subheader("🧩 Analyze My 15-man Squad")
-st.caption("Pick your current 15 players, set your bank (FPL money in the bank), and we’ll pick a best XI, captain/vice, and suggest transfers.")
+st.caption("Pick your current 15 players, set your bank, and we’ll pick a best XI, captain/vice, and suggest transfers.")
 
 if not pred.empty:
     # --- labels keyed by ID (no collisions) ---
@@ -108,7 +121,7 @@ if not pred.empty:
     opts = pred[["id","web_name","name","pos","price"]].copy()
     label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}
 
-    # Multiselect over IDs without a hard cap; show a live counter instead
+    # Multiselect over IDs with count shown
     squad_ids = st.multiselect(
         "Select your 15 players",
         options=list(label_map.keys()),

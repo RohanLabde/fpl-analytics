@@ -1,3 +1,4 @@
+import json
 import streamlit as st
 import pandas as pd
 
@@ -42,6 +43,20 @@ if deadline:
 
 pm   = build_player_master(players, teams, data["positions"])
 soft = fixture_softness(fixtures, teams, horizon=3)   # legacy for V1
+
+# -----------------------
+# Restore squad from URL (persist across refresh/bookmark/share)
+# -----------------------
+try:
+    # experimental_get_query_params is widely supported on Render’s Streamlit versions
+    qp = st.experimental_get_query_params()
+    if "squad" in qp and "squad_ids" not in st.session_state:
+        # allow either ?squad=1,2,3 or repeated query params
+        raw = ",".join(qp["squad"])
+        ids = [int(x) for x in raw.split(",") if x.strip().isdigit()]
+        st.session_state["squad_ids"] = ids[:15]
+except Exception:
+    pass
 
 # -----------------------
 # Sidebar controls
@@ -126,17 +141,57 @@ if not pred.empty:
     opts = pred[["id","web_name","name","pos","price"]].copy()
     label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}
 
-    # Multiselect over IDs with count shown
+    # Multiselect over IDs with count shown; persists in st.session_state["squad_ids"]
     squad_ids = st.multiselect(
         "Select your 15 players",
         options=list(label_map.keys()),
         format_func=lambda pid: label_map.get(int(pid), str(pid)),
-        key="squad_ids"
+        key="squad_ids",
     )
 
     st.caption(f"Selected **{len(squad_ids)}/15** players")
+
+    # ---- Persistence tools (URL + File) ----
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        if st.button("Save squad to URL", use_container_width=True, key="save_url"):
+            try:
+                st.experimental_set_query_params(squad=",".join(map(str, st.session_state.get("squad_ids", []))))
+                st.success("Saved to URL. Bookmark/share this page to restore your squad.")
+            except Exception as e:
+                st.warning(f"Could not write to URL: {e}")
+
+    with c2:
+        st.download_button(
+            "Download squad (.json)",
+            data=json.dumps({"squad": st.session_state.get("squad_ids", [])}),
+            file_name="fpl_squad.json",
+            mime="application/json",
+            use_container_width=True,
+            disabled=len(st.session_state.get("squad_ids", [])) == 0,
+            key="dl_squad",
+        )
+
+    with c3:
+        up = st.file_uploader("Restore from file", type="json", accept_multiple_files=False, key="restore_file")
+        if up is not None:
+            try:
+                obj = json.loads(up.read().decode("utf-8"))
+                ids = [int(x) for x in obj.get("squad", [])][:15]
+                st.session_state["squad_ids"] = ids
+                st.success("Squad restored from file.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not read the file: {e}")
+
+    # ability to clear
     if st.button("Clear selection", key="clear_squad"):
         st.session_state["squad_ids"] = []
+        # also clear URL param
+        try:
+            st.experimental_set_query_params()
+        except Exception:
+            pass
         st.stop()
 
     # Show approx current cost only when exactly 15 are picked

@@ -48,13 +48,14 @@ soft = fixture_softness(fixtures, teams, horizon=3)   # legacy for V1
 # Restore squad from URL (persist across refresh/bookmark/share)
 # -----------------------
 try:
-    # experimental_get_query_params is widely supported on Render’s Streamlit versions
-    qp = st.experimental_get_query_params()
-    if "squad" in qp and "squad_ids" not in st.session_state:
-        # allow either ?squad=1,2,3 or repeated query params
-        raw = ",".join(qp["squad"])
-        ids = [int(x) for x in raw.split(",") if x.strip().isdigit()]
-        st.session_state["squad_ids"] = ids[:15]
+    if "squad_ids" not in st.session_state:
+        qp = st.query_params  # NEW API (no experimental_)
+        if "squad" in qp:
+            raw = ",".join(qp.get_all("squad")) if hasattr(qp, "get_all") else qp["squad"]
+            if isinstance(raw, list):  # depending on Streamlit version
+                raw = ",".join(raw)
+            ids = [int(x) for x in str(raw).split(",") if str(x).strip().isdigit()]
+            st.session_state["squad_ids"] = ids[:15]
 except Exception:
     pass
 
@@ -156,7 +157,8 @@ if not pred.empty:
     with c1:
         if st.button("Save squad to URL", use_container_width=True, key="save_url"):
             try:
-                st.experimental_set_query_params(squad=",".join(map(str, st.session_state.get("squad_ids", []))))
+                # NEW API: write to st.query_params
+                st.query_params["squad"] = ",".join(map(str, st.session_state.get("squad_ids", [])))
                 st.success("Saved to URL. Bookmark/share this page to restore your squad.")
             except Exception as e:
                 st.warning(f"Could not write to URL: {e}")
@@ -187,9 +189,9 @@ if not pred.empty:
     # ability to clear
     if st.button("Clear selection", key="clear_squad"):
         st.session_state["squad_ids"] = []
-        # also clear URL param
+        # also clear URL param (NEW API)
         try:
-            st.experimental_set_query_params()
+            st.query_params.clear()
         except Exception:
             pass
         st.stop()

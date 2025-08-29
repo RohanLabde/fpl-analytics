@@ -148,16 +148,18 @@ if not pred.empty:
     prev = st.session_state.get("squad_ids", [])
     prev = [int(x) for x in prev if int(x) in label_map]  # prune to valid ids
 
-    # Older Streamlit: use 'default=', not 'value='
-    squad_ids = st.multiselect(
+    # Older Streamlit: use 'default=' only
+    st.multiselect(
         "Select your 15 players",
         list(label_map.keys()),
         default=prev,
         format_func=lambda pid: label_map.get(int(pid), str(pid)),
         key="squad_ids",
     )
-    # Write back sanitized value so downstream logic sees the same list
-    st.session_state["squad_ids"] = squad_ids
+
+    # READ the selection (do not assign back to the same key!)
+    squad_ids = st.session_state.get("squad_ids", [])
+    squad_ids = [int(x) for x in squad_ids if int(x) in label_map]
 
     st.caption(f"Selected **{len(squad_ids)}/15** players")
 
@@ -166,7 +168,7 @@ if not pred.empty:
     with c1:
         if st.button("Save squad to URL", use_container_width=True, key="save_url"):
             try:
-                st.query_params["squad"] = ",".join(map(str, st.session_state.get("squad_ids", [])))
+                st.query_params["squad"] = ",".join(map(str, squad_ids))
                 st.success("Saved to URL. Bookmark/share this page to restore your squad.")
             except Exception as e:
                 st.warning(f"Could not write to URL: {e}")
@@ -174,11 +176,11 @@ if not pred.empty:
     with c2:
         st.download_button(
             "Download squad (.json)",
-            data=json.dumps({"squad": st.session_state.get("squad_ids", [])}),
+            data=json.dumps({"squad": squad_ids}),
             file_name="fpl_squad.json",
             mime="application/json",
             use_container_width=True,
-            disabled=len(st.session_state.get("squad_ids", [])) == 0,
+            disabled=len(squad_ids) == 0,
             key="dl_squad",
         )
 
@@ -188,7 +190,7 @@ if not pred.empty:
             try:
                 obj = json.loads(up.read().decode("utf-8"))
                 ids = [int(x) for x in obj.get("squad", [])][:15]
-                st.session_state["squad_ids"] = ids
+                st.session_state["squad_ids"] = ids  # allowed here: before next-run widget instantiation
                 st.success("Squad restored from file.")
                 st.rerun()
             except Exception as e:

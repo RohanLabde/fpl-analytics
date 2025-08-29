@@ -49,10 +49,10 @@ soft = fixture_softness(fixtures, teams, horizon=3)   # legacy for V1
 # -----------------------
 try:
     if "squad_ids" not in st.session_state:
-        qp = st.query_params  # NEW API (no experimental_)
+        qp = st.query_params  # modern Streamlit API
         if "squad" in qp:
             raw = ",".join(qp.get_all("squad")) if hasattr(qp, "get_all") else qp["squad"]
-            if isinstance(raw, list):  # depending on Streamlit version
+            if isinstance(raw, list):
                 raw = ",".join(raw)
             ids = [int(x) for x in str(raw).split(",") if str(x).strip().isdigit()]
             st.session_state["squad_ids"] = ids[:15]
@@ -140,15 +140,25 @@ if not pred.empty:
         return f"{row['web_name']} ({row['name']}, {row['pos']}, {row['price']:.1f})"
 
     opts = pred[["id","web_name","name","pos","price"]].copy()
+    # Coerce IDs to plain int to avoid np.int64 vs int mismatch on reruns
+    opts["id"] = opts["id"].apply(lambda x: int(x) if pd.notna(x) else x)
     label_map = {int(row["id"]): label_for_row(row) for _, row in opts.iterrows()}
 
-    # Multiselect over IDs with count shown; persists in st.session_state["squad_ids"]
+    # --- PERSIST: restore & sanitize selection across reruns (e.g., horizon slider) ---
+    prev = st.session_state.get("squad_ids", [])
+    prev = [int(x) for x in prev if int(x) in label_map]  # prune to valid ids
+
+    # Multiselect with explicit 'value' so it keeps selection on rerun
     squad_ids = st.multiselect(
         "Select your 15 players",
         options=list(label_map.keys()),
         format_func=lambda pid: label_map.get(int(pid), str(pid)),
         key="squad_ids",
+        default=None,   # old Streamlit
+        value=prev,     # new Streamlit
     )
+    # Write back sanitized value so downstream logic sees the same list
+    st.session_state["squad_ids"] = squad_ids
 
     st.caption(f"Selected **{len(squad_ids)}/15** players")
 
@@ -157,7 +167,6 @@ if not pred.empty:
     with c1:
         if st.button("Save squad to URL", use_container_width=True, key="save_url"):
             try:
-                # NEW API: write to st.query_params
                 st.query_params["squad"] = ",".join(map(str, st.session_state.get("squad_ids", [])))
                 st.success("Saved to URL. Bookmark/share this page to restore your squad.")
             except Exception as e:
@@ -189,7 +198,6 @@ if not pred.empty:
     # ability to clear
     if st.button("Clear selection", key="clear_squad"):
         st.session_state["squad_ids"] = []
-        # also clear URL param (NEW API)
         try:
             st.query_params.clear()
         except Exception:

@@ -148,14 +148,13 @@ if not pred.empty:
     prev = st.session_state.get("squad_ids", [])
     prev = [int(x) for x in prev if int(x) in label_map]  # prune to valid ids
 
-    # Multiselect with explicit 'value' so it keeps selection on rerun
+    # Older Streamlit: use 'default=', not 'value='
     squad_ids = st.multiselect(
         "Select your 15 players",
-        options=list(label_map.keys()),
+        list(label_map.keys()),
+        default=prev,
         format_func=lambda pid: label_map.get(int(pid), str(pid)),
         key="squad_ids",
-        default=None,   # old Streamlit
-        value=prev,     # new Streamlit
     )
     # Write back sanitized value so downstream logic sees the same list
     st.session_state["squad_ids"] = squad_ids

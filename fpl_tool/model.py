@@ -2,74 +2,77 @@ import pandas as pd
 import numpy as np
 
 
-def baseline_expected_points(pm: pd.DataFrame, teams: pd.DataFrame, soft: pd.DataFrame) -> pd.DataFrame:
+def baseline_expected_points(pm: pd.DataFrame, horizon: int = 3) -> pd.DataFrame:
     """
-    Baseline expected points model:
-    Combines form, minutes, and fixture softness into xPts.
+    Baseline expected points calculation.
+    Just uses form, minutes, and fixture softness as per V1.
     """
     df = pm.copy()
-
-    # Safe fill to avoid NaNs messing things up
-    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
-    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
-
-    # Normalize
-    df["form_norm"] = df["form"] / df["form"].max() if df["form"].max() > 0 else 0
-    df["minutes_norm"] = df["minutes"] / df["minutes"].max() if df["minutes"].max() > 0 else 0
-
-    # Fixture softness match (defense proxy)
-    df = df.merge(soft, on="team", how="left")
-    df["soft_norm"] = df["softness"] / df["softness"].max() if df["softness"].max() > 0 else 0
-
-    # Weighted sum
     df["xPts"] = (
-        0.7 * df["form_norm"] +
-        0.2 * df["minutes_norm"] +
-        0.1 * df["soft_norm"]
-    ) * 10  # scale up for interpretability
-
-    # Always compute value metric
-    df["xPts_per_m"] = df["xPts"] / df["now_cost"].replace(0, np.nan)
-
+        df["form"] * 0.7
+        + df["xMins"] * 0.2
+        + (1.0 - df["fixture_softness"]) * 0.1
+    ) * horizon
     return df
 
 
-def v2_expected_points(pm: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame, horizon: int = 3) -> pd.DataFrame:
+def v2_expected_points(pm: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 3) -> pd.DataFrame:
     """
-    V2 expected points model:
-    Uses fixture horizon, Poisson clean sheets, attacking proxy.
+    Smarter expected points calculation (V2).
+    - Considers minutes (xMins)
+    - Adjusts by clean sheet probability using a Poisson proxy
+    - Includes fixture horizon dynamically
     """
-    df = pm.copy()
 
-    # Minutes weight
-    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
-    df["minutes_norm"] = df["minutes"] / df["minutes"].max() if df["minutes"].max() > 0 else 0
+    preds = []
 
-    # Attacking proxy: goals + assists per 90
-    df["attacking_proxy"] = (
-        (df["goals_scored"] + df["assists"]) / df["minutes"].replace(0, np.nan) * 90
-    ).fillna(0)
-    df["attacking_norm"] = df["attacking_proxy"] / df["attacking_proxy"].max() if df["attacking_proxy"].max() > 0 else 0
+    # Detect correct fixture column names
+    if "team_h" in fixtures.columns and "team_a" in fixtures.columns:
+        home_col, away_col = "team_h", "team_a"
+    elif "team_home" in fixtures.columns and "team_away" in fixtures.columns:
+        home_col, away_col = "team_home", "team_away"
+    else:
+        raise KeyError(f"Fixtures missing expected team columns. Found: {fixtures.columns}")
 
-    # Fixture horizon softness: average opponent difficulty over N matches
-    team_softness = []
-    for team_id in df["team"].unique():
-        team_fixt = fixtures[(fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)].head(horizon)
-        softness = team_fixt["difficulty"].mean() if not team_fixt.empty else np.nan
-        team_softness.append({"team": team_id, "softness": softness})
-    team_softness = pd.DataFrame(team_softness)
+    for _, player in pm.iterrows():
+        team_id = player["team_id"]
 
-    df = df.merge(team_softness, on="team", how="left")
-    df["soft_norm"] = df["softness"] / df["softness"].max() if df["softness"].max() > 0 else 0
+        # Get fixtures for this team in horizon
+        team_fixt = fixtures[
+            (fixtures[home_col] == team_id) | (fixtures[away_col] == team_id)
+        ].head(horizon)
 
-    # Weighted sum
-    df["xPts"] = (
-        0.5 * df["minutes_norm"] +
-        0.3 * df["attacking_norm"] +
-        0.2 * (1 - df["soft_norm"])   # easier fixtures = higher points
-    ) * 10
+        if team_fixt.empty:
+            xp = 0.0
+        else:
+            # Minutes proxy
+            mins_factor = player.get("xMins", 60) / 90.0
 
-    # Always compute value metric
-    df["xPts_per_m"] = df["xPts"] / df["now_cost"].replace(0, np.nan)
+            # Base form proxy
+            form_factor = float(player.get("form", 0))
 
+            # Fixture softness adjustment (if available)
+            if "fixture_softness" in pm.columns:
+                soft_factor = 1.0 - float(player["fixture_softness"])
+            else:
+                soft_factor = 1.0
+
+            # Poisson clean sheet proxy: assume weaker teams concede ~2 goals, strong ~0.8
+            avg_difficulty = team_fixt.get("difficulty", pd.Series([3])).mean()
+            cs_prob = max(0.05, 1.2 - (avg_difficulty * 0.2))  # keep between 0.05–1.0
+
+            # Expected points calculation
+            xp = (form_factor * 0.6 + mins_factor * 0.3 + cs_prob * 0.1) * len(team_fixt)
+
+        preds.append({"id": player["id"], "xPts": round(xp, 3)})
+
+    return pm.merge(pd.DataFrame(preds), on="id")
+
+
+def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds value metrics like xPts per million.
+    """
+    df = df.copy()
+    df["xPts_per_m"] = df["xPts"] / df["price"]
     return df

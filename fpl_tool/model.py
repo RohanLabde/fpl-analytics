@@ -2,64 +2,74 @@ import pandas as pd
 import numpy as np
 
 
-def baseline_expected_points(
-    players: pd.DataFrame, fixtures: pd.DataFrame, horizon: int = 3
-) -> pd.DataFrame:
+def baseline_expected_points(pm: pd.DataFrame, teams: pd.DataFrame, soft: pd.DataFrame) -> pd.DataFrame:
     """
     Baseline expected points model:
-    - Uses form * (minutes / 90)
-    - Scales by fixture horizon
+    Combines form, minutes, and fixture softness into xPts.
     """
-    df = players.copy()
+    df = pm.copy()
 
-    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0.0)
-    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0.0)
+    # Safe fill to avoid NaNs messing things up
+    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
+    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
 
-    df["xPts"] = (df["form"] * (df["minutes"] / 90.0)) * (horizon / 3.0)
+    # Normalize
+    df["form_norm"] = df["form"] / df["form"].max() if df["form"].max() > 0 else 0
+    df["minutes_norm"] = df["minutes"] / df["minutes"].max() if df["minutes"].max() > 0 else 0
+
+    # Fixture softness match (defense proxy)
+    df = df.merge(soft, on="team", how="left")
+    df["soft_norm"] = df["softness"] / df["softness"].max() if df["softness"].max() > 0 else 0
+
+    # Weighted sum
+    df["xPts"] = (
+        0.7 * df["form_norm"] +
+        0.2 * df["minutes_norm"] +
+        0.1 * df["soft_norm"]
+    ) * 10  # scale up for interpretability
+
+    # Always compute value metric
+    df["xPts_per_m"] = df["xPts"] / df["now_cost"].replace(0, np.nan)
 
     return df
 
 
-def v2_expected_points(
-    players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 3
-) -> pd.DataFrame:
+def v2_expected_points(pm: pd.DataFrame, teams: pd.DataFrame, fixtures: pd.DataFrame, horizon: int = 3) -> pd.DataFrame:
     """
-    Smarter expected points model (V2):
-    - Base xPts from form + normalized minutes
-    - Adds clean sheet proxy for DEFs & GKs
-    - Adds attacking proxy for MIDs & FWDs
-    - Scales across fixture horizon
+    V2 expected points model:
+    Uses fixture horizon, Poisson clean sheets, attacking proxy.
     """
+    df = pm.copy()
 
-    df = players.copy()
+    # Minutes weight
+    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
+    df["minutes_norm"] = df["minutes"] / df["minutes"].max() if df["minutes"].max() > 0 else 0
 
-    # Ensure numeric
-    for col in ["form", "minutes", "appearances", "clean_sheets", "goals_scored", "assists"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-        else:
-            df[col] = 0.0
+    # Attacking proxy: goals + assists per 90
+    df["attacking_proxy"] = (
+        (df["goals_scored"] + df["assists"]) / df["minutes"].replace(0, np.nan) * 90
+    ).fillna(0)
+    df["attacking_norm"] = df["attacking_proxy"] / df["attacking_proxy"].max() if df["attacking_proxy"].max() > 0 else 0
 
-    # Avoid divide by zero
-    df["appearances"] = df["appearances"].replace(0, 1)
+    # Fixture horizon softness: average opponent difficulty over N matches
+    team_softness = []
+    for team_id in df["team"].unique():
+        team_fixt = fixtures[(fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)].head(horizon)
+        softness = team_fixt["difficulty"].mean() if not team_fixt.empty else np.nan
+        team_softness.append({"team": team_id, "softness": softness})
+    team_softness = pd.DataFrame(team_softness)
 
-    # Minutes per match
-    df["minutes_per_match"] = df["minutes"] / df["appearances"]
+    df = df.merge(team_softness, on="team", how="left")
+    df["soft_norm"] = df["softness"] / df["softness"].max() if df["softness"].max() > 0 else 0
 
-    # Base score
-    df["xPts"] = df["form"] * (df["minutes_per_match"] / 90.0)
+    # Weighted sum
+    df["xPts"] = (
+        0.5 * df["minutes_norm"] +
+        0.3 * df["attacking_norm"] +
+        0.2 * (1 - df["soft_norm"])   # easier fixtures = higher points
+    ) * 10
 
-    # Defensive proxy
-    defensive_positions = ["GKP", "DEF"]
-    df.loc[df["pos"].isin(defensive_positions), "xPts"] += df["clean_sheets"] * 0.2
-
-    # Attacking proxy
-    attacking_positions = ["MID", "FWD"]
-    df.loc[df["pos"].isin(attacking_positions), "xPts"] += (
-        df["goals_scored"] * 0.3 + df["assists"] * 0.2
-    )
-
-    # Scale by fixture horizon
-    df["xPts"] = df["xPts"] * horizon
+    # Always compute value metric
+    df["xPts_per_m"] = df["xPts"] / df["now_cost"].replace(0, np.nan)
 
     return df

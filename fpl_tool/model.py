@@ -2,68 +2,101 @@ import pandas as pd
 import numpy as np
 
 
-def baseline_expected_points(players: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
-    """
-    Basic model: expected points from form + minutes.
-    """
+def build_player_master(players, teams, element_types):
+    """Build player master DataFrame with relevant fields."""
     df = players.copy()
-    df["xPts"] = (
-        df["form"].astype(float) * 0.6 +
-        (df["minutes"] / 90).clip(0, horizon) * 0.4
-    )
+
+    # Map team and position
+    team_map = teams.set_index("id")["name"].to_dict()
+    pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
+
+    df["team_name"] = df["team"].map(team_map)
+    df["pos"] = df["element_type"].map(pos_map)
+
+    # Keep only relevant columns
+    keep_cols = [
+        "id",
+        "web_name",
+        "team",
+        "team_name",
+        "pos",
+        "now_cost",
+        "minutes",
+        "form",              # ✅ ensure form is kept
+        "points_per_game",
+        "ep_next",
+        "ep_this"
+    ]
+    return df[keep_cols]
+
+
+def baseline_expected_points(players: pd.DataFrame) -> pd.DataFrame:
+    """Simple expected points based on form + minutes."""
+    df = players.copy()
+
+    # Ensure numeric
+    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
+    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
+
+    # Very simple heuristic: form scaled by minutes played
+    df["xPts"] = (df["form"] * 0.6) + (df["minutes"] / 1000 * 0.4)
     return df
 
 
 def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
     """
-    Improved model:
-    - Expected minutes
-    - Fixture difficulty (Poisson proxy)
-    - Role weighting by position
+    Smarter expected points model:
+    - Uses form
+    - Minutes weighting
+    - Fixture softness (based on opponent difficulty)
+    - Role adjustment (FWD/MID > DEF > GK)
     """
+
     df = players.copy()
 
-    # role multipliers
-    role_weight = {"GKP": 0.8, "DEF": 1.0, "MID": 1.2, "FWD": 1.4}
-    df["role_weight"] = df["pos"].map(role_weight).fillna(1.0)
+    # Ensure numeric
+    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
+    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
 
-    xpts = []
+    # Base points: form + minutes
+    base_xpts = df["form"] * 0.5 + (df["minutes"] / 1000) * 0.3
+
+    # Fixture softness
+    fixture_diffs = []
     for _, player in df.iterrows():
-        team_id = player["team"]   # FIX: was team_id, now corrected
-        # Get upcoming fixtures for this player's team
+        team_id = player["team"]
         team_fixt = fixtures[
             (fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)
         ].head(horizon)
 
-        # Fixture difficulty proxy
-        if "team_h_difficulty" in fixtures.columns:
-            diffs = np.where(
-                team_fixt["team_h"] == team_id,
-                team_fixt["team_h_difficulty"],
-                team_fixt["team_a_difficulty"]
-            )
-            fixture_factor = np.clip(5 - diffs.mean(), 1, 5) / 5
+        if not team_fixt.empty:
+            # Opponent strength
+            opp_strength = []
+            for _, row in team_fixt.iterrows():
+                if row["team_h"] == team_id:
+                    opp_id = row["team_a"]
+                    opp_strength.append(row["team_a_difficulty"])
+                else:
+                    opp_id = row["team_h"]
+                    opp_strength.append(row["team_h_difficulty"])
+
+            avg_diff = np.mean(opp_strength)
+            fixture_softness = max(0, (5 - avg_diff) / 5)  # scale 0-1
         else:
-            fixture_factor = 1.0
+            fixture_softness = 0.5
 
-        minutes_factor = min(player["minutes"] / (90 * horizon), 1.0)
+        fixture_diffs.append(fixture_softness)
 
-        xp = (
-            player["form"].astype(float) * 0.5 +
-            fixture_factor * 0.3 +
-            minutes_factor * 0.2
-        ) * player["role_weight"]
+    df["fixture_softness"] = fixture_diffs
 
-        xpts.append(xp)
+    # Position weights
+    pos_weights = {"FWD": 1.2, "MID": 1.1, "DEF": 0.9, "GK": 0.8}
+    df["role_weight"] = df["pos"].map(pos_weights).fillna(1.0)
 
-    df["xPts"] = xpts
-    return df
+    # Final xPts
+    df["xPts"] = (
+        base_xpts +
+        df["fixture_softness"] * 2
+    ) * df["role_weight"]
 
-
-def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add value-for-money metrics (xPts per million).
-    """
-    df = df.copy()
-    df["xPts_per_m"] = df["xPts"] / df["price"].replace(0, np.nan)
     return df

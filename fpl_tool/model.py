@@ -100,3 +100,17 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
     ) * df["role_weight"]
 
     return df
+
+import pandas as pd
+
+def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds value-related helper columns for player selection.
+    - xPts_per_m: Expected points per million (budget efficiency)
+    - value: xPts per cost unit
+    """
+    df = df.copy()
+    if "xPts" in df.columns and "now_cost" in df.columns:
+        df["xPts_per_m"] = df["xPts"] / (df["now_cost"] / 10)  # cost in £m
+        df["value"] = df["xPts"] / df["now_cost"]
+    return df

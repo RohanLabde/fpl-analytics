@@ -32,7 +32,7 @@ st.set_page_config(page_title="FPL Analytics – Expected Points Model", layout=
 st.title("⚽ FPL Analytics – Smarter Expected Points")
 st.caption(
     "Data: Official Fantasy Premier League API. "
-    "Model uses xG, xA, clean sheet probability & saves per 90 to estimate realistic xPts."
+    "Model uses xG, xA, clean sheet probability, saves & fixture horizon adjustments."
 )
 
 # Load data
@@ -68,7 +68,7 @@ for pos, table in captaincy_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "att_factor", "xPts"]
     elif pos == "DEF":
         display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts"]
     elif pos == "GKP":
@@ -87,7 +87,7 @@ for pos, table in value_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts per million**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "att_factor", "xPts_per_m"]
     elif pos == "DEF":
         display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts_per_m"]
     elif pos == "GKP":

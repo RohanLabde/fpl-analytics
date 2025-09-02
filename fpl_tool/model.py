@@ -18,10 +18,10 @@ def build_player_master(players, teams, element_types):
 
 def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
     """
-    Smarter expected points model using FPL API advanced stats:
-    - FWD & MID: attacking returns (xG + xA)
-    - DEF: attacking + clean sheet probability
-    - GKP: clean sheet + saves
+    Smarter expected points model using FPL API advanced stats + fixture horizon:
+    - FWD & MID: attacking returns (xG + xA) + appearance points
+    - DEF: attacking returns + clean sheet probability (fixture horizon) + appearance points
+    - GKP: clean sheet probability (fixture horizon) + saves + appearance points
     """
 
     df = players.copy()
@@ -37,28 +37,47 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
         else:
             df[col] = 0
 
-    # Project minutes (average per match * horizon)
-    df["minutes_proj"] = (df["minutes"] / df["minutes"].clip(lower=1).count()) * horizon
-    df["games_proj"] = df["minutes_proj"] / 90
+    # Projected games from minutes (rough proxy)
+    df["games_proj"] = (df["minutes"] / 90).clip(upper=horizon)
+    df["minutes_proj"] = df["games_proj"] * 90
 
-    # --- Attacking returns ---
+    # --- Attacking returns (xG + xA scaled by projected games) ---
     df["xAttack"] = (df["expected_goals_per_90"] + df["expected_assists_per_90"]) * df["games_proj"]
 
-    # --- Clean sheet proxy ---
-    # Approx: based on opponent difficulty (FDR scale 1–5 → convert to CS chance)
-    # If avg opponent difficulty ≈ 2 → higher CS chance, if ≈ 5 → low CS chance
-    team_fixtures = fixtures.groupby("team_h")[["team_h_difficulty"]].mean().to_dict()["team_h_difficulty"]
-    df["avg_fixture_difficulty"] = df["team"].map(team_fixtures).fillna(3)
-    df["cs_prob"] = np.clip((5 - df["avg_fixture_difficulty"]) / 5, 0.05, 0.7)  # between 5%–70%
+    # --- Fixture horizon clean sheet probability ---
+    cs_probs = []
+    for _, player in df.iterrows():
+        team_id = player["team"]
+
+        # Next N fixtures where this team plays
+        team_fixt = fixtures[
+            (fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)
+        ].sort_values("kickoff_time").head(horizon)
+
+        fixture_cs = []
+        for _, fx in team_fixt.iterrows():
+            if fx["team_h"] == team_id:
+                diff = fx["team_h_difficulty"]
+            else:
+                diff = fx["team_a_difficulty"]
+
+            # Convert FDR difficulty (1–5) into CS probability
+            cs_prob = max(0.05, (5 - diff) / 5)  # e.g. diff=2 → 0.6, diff=4 → 0.2
+            fixture_cs.append(cs_prob)
+
+        avg_cs = np.mean(fixture_cs) if fixture_cs else 0.2
+        cs_probs.append(avg_cs)
+
+    df["cs_prob"] = cs_probs
 
     # --- Saves proxy for GKs ---
-    df["xSaves"] = df["saves_per_90"] * df["games_proj"] * 0.33  # 1 save point every 3 saves
+    df["xSaves"] = df["saves_per_90"] * df["games_proj"] * 0.33  # 1 save point per 3 saves
 
     # --- Position-specific xPts ---
     xpts = []
     for _, row in df.iterrows():
         if row["pos"] in ["FWD", "MID"]:
-            xp = row["xAttack"] + (row["games_proj"] * 2)  # 2 pts for appearance
+            xp = row["xAttack"] + (row["games_proj"] * 2)  # 2 pts appearance
         elif row["pos"] == "DEF":
             xp = row["xAttack"] + (row["cs_prob"] * 4 * row["games_proj"]) + (row["games_proj"] * 2)
         elif row["pos"] == "GKP":
@@ -73,9 +92,7 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
 
 
 def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add value-for-money metrics.
-    """
+    """Add value-for-money metrics."""
     df = df.copy()
     df["xPts_per_m"] = df["xPts"] / (df["now_cost"] / 10)
     return df

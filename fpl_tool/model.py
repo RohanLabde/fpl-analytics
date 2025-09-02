@@ -3,114 +3,79 @@ import numpy as np
 
 
 def build_player_master(players, teams, element_types):
-    """Build player master DataFrame with relevant fields."""
+    """Build enriched player DataFrame with team + position labels."""
     df = players.copy()
 
-    # Map team and position
+    # Map team name and position (short labels: GKP, DEF, MID, FWD)
     team_map = teams.set_index("id")["name"].to_dict()
     pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
 
     df["team_name"] = df["team"].map(team_map)
     df["pos"] = df["element_type"].map(pos_map)
 
-    # Keep only relevant columns
-    keep_cols = [
-        "id",
-        "web_name",
-        "team",
-        "team_name",
-        "pos",
-        "now_cost",
-        "minutes",
-        "form",              # ✅ ensure form is kept
-        "points_per_game",
-        "ep_next",
-        "ep_this"
-    ]
-    return df[keep_cols]
-
-
-def baseline_expected_points(players: pd.DataFrame) -> pd.DataFrame:
-    """Simple expected points based on form + minutes."""
-    df = players.copy()
-
-    # Ensure numeric
-    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
-    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
-
-    # Very simple heuristic: form scaled by minutes played
-    df["xPts"] = (df["form"] * 0.6) + (df["minutes"] / 1000 * 0.4)
     return df
 
 
 def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
     """
-    Smarter expected points model:
-    - Uses form
-    - Minutes weighting
-    - Fixture softness (based on opponent difficulty)
-    - Role adjustment (FWD/MID > DEF > GK)
+    Smarter expected points model using FPL API advanced stats:
+    - FWD & MID: attacking returns (xG + xA)
+    - DEF: attacking + clean sheet probability
+    - GKP: clean sheet + saves
     """
 
     df = players.copy()
 
-    # Ensure numeric
-    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
-    df["minutes"] = pd.to_numeric(df["minutes"], errors="coerce").fillna(0)
-
-    # Base points: form + minutes
-    base_xpts = df["form"] * 0.5 + (df["minutes"] / 1000) * 0.3
-
-    # Fixture softness
-    fixture_diffs = []
-    for _, player in df.iterrows():
-        team_id = player["team"]
-        team_fixt = fixtures[
-            (fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)
-        ].head(horizon)
-
-        if not team_fixt.empty:
-            # Opponent strength
-            opp_strength = []
-            for _, row in team_fixt.iterrows():
-                if row["team_h"] == team_id:
-                    opp_id = row["team_a"]
-                    opp_strength.append(row["team_a_difficulty"])
-                else:
-                    opp_id = row["team_h"]
-                    opp_strength.append(row["team_h_difficulty"])
-
-            avg_diff = np.mean(opp_strength)
-            fixture_softness = max(0, (5 - avg_diff) / 5)  # scale 0-1
+    # Ensure numeric for advanced stats
+    numeric_cols = [
+        "minutes", "expected_goals_per_90", "expected_assists_per_90",
+        "expected_goal_involvements_per_90", "saves_per_90"
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         else:
-            fixture_softness = 0.5
+            df[col] = 0
 
-        fixture_diffs.append(fixture_softness)
+    # Project minutes (average per match * horizon)
+    df["minutes_proj"] = (df["minutes"] / df["minutes"].clip(lower=1).count()) * horizon
+    df["games_proj"] = df["minutes_proj"] / 90
 
-    df["fixture_softness"] = fixture_diffs
+    # --- Attacking returns ---
+    df["xAttack"] = (df["expected_goals_per_90"] + df["expected_assists_per_90"]) * df["games_proj"]
 
-    # Position weights
-    pos_weights = {"FWD": 1.2, "MID": 1.1, "DEF": 0.9, "GK": 0.8}
-    df["role_weight"] = df["pos"].map(pos_weights).fillna(1.0)
+    # --- Clean sheet proxy ---
+    # Approx: based on opponent difficulty (FDR scale 1–5 → convert to CS chance)
+    # If avg opponent difficulty ≈ 2 → higher CS chance, if ≈ 5 → low CS chance
+    team_fixtures = fixtures.groupby("team_h")[["team_h_difficulty"]].mean().to_dict()["team_h_difficulty"]
+    df["avg_fixture_difficulty"] = df["team"].map(team_fixtures).fillna(3)
+    df["cs_prob"] = np.clip((5 - df["avg_fixture_difficulty"]) / 5, 0.05, 0.7)  # between 5%–70%
 
-    # Final xPts
-    df["xPts"] = (
-        base_xpts +
-        df["fixture_softness"] * 2
-    ) * df["role_weight"]
+    # --- Saves proxy for GKs ---
+    df["xSaves"] = df["saves_per_90"] * df["games_proj"] * 0.33  # 1 save point every 3 saves
+
+    # --- Position-specific xPts ---
+    xpts = []
+    for _, row in df.iterrows():
+        if row["pos"] in ["FWD", "MID"]:
+            xp = row["xAttack"] + (row["games_proj"] * 2)  # 2 pts for appearance
+        elif row["pos"] == "DEF":
+            xp = row["xAttack"] + (row["cs_prob"] * 4 * row["games_proj"]) + (row["games_proj"] * 2)
+        elif row["pos"] == "GKP":
+            xp = (row["cs_prob"] * 4 * row["games_proj"]) + row["xSaves"] + (row["games_proj"] * 2)
+        else:
+            xp = row["games_proj"] * 2
+        xpts.append(xp)
+
+    df["xPts"] = xpts
 
     return df
 
-import pandas as pd
 
 def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Adds value-related helper columns for player selection.
-    - xPts_per_m: Expected points per million (budget efficiency)
-    - value: xPts per cost unit
+    Add value-for-money metrics.
     """
     df = df.copy()
-    if "xPts" in df.columns and "now_cost" in df.columns:
-        df["xPts_per_m"] = df["xPts"] / (df["now_cost"] / 10)  # cost in £m
-        df["value"] = df["xPts"] / df["now_cost"]
+    df["xPts_per_m"] = df["xPts"] / (df["now_cost"] / 10)
     return df

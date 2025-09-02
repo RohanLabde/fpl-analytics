@@ -51,11 +51,11 @@ pred = add_value_columns(pred)
 
 
 # --- Helper: Top picks by position ---
-def show_top_by_position(df, top_n=10, gk_n=3):
+def show_top_by_position(df, sort_col="xPts", top_n=10, gk_n=3):
     pos_map = {"GKP": gk_n, "DEF": top_n, "MID": top_n, "FWD": top_n}
     result = {}
     for pos, n in pos_map.items():
-        subset = df[df["pos"] == pos].sort_values("xPts", ascending=False).head(n)
+        subset = df[df["pos"] == pos].sort_values(sort_col, ascending=False).head(n)
         result[pos] = subset
     return result
 
@@ -63,7 +63,7 @@ def show_top_by_position(df, top_n=10, gk_n=3):
 # --- Captaincy Picks ---
 st.subheader("🎯 Captaincy picks (Top by xPts per position)")
 
-captaincy_tables = show_top_by_position(pred, top_n=10, gk_n=3)
+captaincy_tables = show_top_by_position(pred, sort_col="xPts", top_n=10, gk_n=3)
 for pos, table in captaincy_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts**")
 
@@ -82,7 +82,7 @@ for pos, table in captaincy_tables.items():
 # --- Value Picks ---
 st.subheader("💼 Value picks (Top by xPts per million per position)")
 
-value_tables = show_top_by_position(pred, top_n=10, gk_n=3)
+value_tables = show_top_by_position(pred, sort_col="xPts_per_m", top_n=10, gk_n=3)
 for pos, table in value_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts per million**")
 

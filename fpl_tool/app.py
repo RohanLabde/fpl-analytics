@@ -52,23 +52,29 @@ pred = add_value_columns(pred)
 
 # --- Helper: Top picks by position ---
 def show_top_by_position(df, col, top_n=5, gk_n=3):
-    pos_map = {"GK": gk_n, "DEF": top_n, "MID": top_n, "FWD": top_n}
-    tables = []
+    pos_map = {"GKP": gk_n, "DEF": top_n, "MID": top_n, "FWD": top_n}
+    tables = {}
     for pos, n in pos_map.items():
         subset = df[df["pos"] == pos].sort_values(col, ascending=False).head(n)
-        tables.append(subset[["web_name", "pos", "team_name", "now_cost", "form", col]])
-    return pd.concat(tables)
+        tables[pos] = subset[["web_name", "pos", "team_name", "now_cost", "form", col]]
+    return tables
 
 
 # --- Captaincy Picks ---
 st.subheader("🎯 Captaincy picks (Top by xPts per position)")
-top_captaincy = show_top_by_position(pred, "xPts")
-st.dataframe(top_captaincy.reset_index(drop=True))
+captaincy_tables = show_top_by_position(pred, "xPts")
+
+for pos, table in captaincy_tables.items():
+    with st.expander(f"Top {len(table)} {pos}s by xPts"):
+        st.dataframe(table.reset_index(drop=True))
 
 # --- Value Picks ---
 st.subheader("💼 Value picks (Top by xPts per million per position)")
-top_value = show_top_by_position(pred, "xPts_per_m")
-st.dataframe(top_value.reset_index(drop=True))
+value_tables = show_top_by_position(pred, "xPts_per_m")
+
+for pos, table in value_tables.items():
+    with st.expander(f"Top {len(table)} {pos}s by xPts per million"):
+        st.dataframe(table.reset_index(drop=True))
 
 
 # --- Analyze My Squad ---
@@ -90,9 +96,9 @@ bank = st.number_input("Bank (money in the bank, £m)", min_value=0.0, step=0.1)
 if len(squad_ids) == 15:
     squad_df = pred[pred["id"].isin(squad_ids)].copy()
 
-    # Pick Best XI (basic heuristic: 1 GK, 3 DEF, 4 MID, 3 FWD)
+    # Pick Best XI (basic heuristic: 1 GKP, 3 DEF, 4 MID, 3 FWD)
     best_xi = []
-    best_xi.append(squad_df[squad_df["pos"] == "GK"].sort_values("xPts", ascending=False).head(1))
+    best_xi.append(squad_df[squad_df["pos"] == "GKP"].sort_values("xPts", ascending=False).head(1))
     best_xi.append(squad_df[squad_df["pos"] == "DEF"].sort_values("xPts", ascending=False).head(3))
     best_xi.append(squad_df[squad_df["pos"] == "MID"].sort_values("xPts", ascending=False).head(4))
     best_xi.append(squad_df[squad_df["pos"] == "FWD"].sort_values("xPts", ascending=False).head(3))
@@ -136,7 +142,7 @@ if len(squad_ids) == 15:
         new_squad_df = pred[pred["id"].isin(new_squad_ids)]
 
         new_xi = []
-        new_xi.append(new_squad_df[new_squad_df["pos"] == "GK"].sort_values("xPts", ascending=False).head(1))
+        new_xi.append(new_squad_df[new_squad_df["pos"] == "GKP"].sort_values("xPts", ascending=False).head(1))
         new_xi.append(new_squad_df[new_squad_df["pos"] == "DEF"].sort_values("xPts", ascending=False).head(3))
         new_xi.append(new_squad_df[new_squad_df["pos"] == "MID"].sort_values("xPts", ascending=False).head(4))
         new_xi.append(new_squad_df[new_squad_df["pos"] == "FWD"].sort_values("xPts", ascending=False).head(3))

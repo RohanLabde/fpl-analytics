@@ -27,12 +27,12 @@ def load_fixtures():
 
 
 # --- Streamlit UI ---
-st.set_page_config(page_title="FPL Analytics – Fast Decisions", layout="wide")
+st.set_page_config(page_title="FPL Analytics – Expected Points Model", layout="wide")
 
-st.title("⚽ FPL Analytics – Fast Decisions")
+st.title("⚽ FPL Analytics – Smarter Expected Points")
 st.caption(
     "Data: Official Fantasy Premier League API. "
-    "V2 model = minutes + form + Poisson clean sheets + attacking proxy, with fixture horizon."
+    "Model uses xG, xA, clean sheet probability & saves per 90 to estimate realistic xPts."
 )
 
 # Load data
@@ -45,36 +45,57 @@ pm = build_player_master(players, teams, element_types)
 st.sidebar.header("Model Settings")
 horizon = st.sidebar.slider("Fixture horizon (matches)", 1, 10, 5)
 
-# Always use V2
+# Always use new V2 logic
 pred = v2_expected_points(pm, fixtures, teams, horizon=horizon)
 pred = add_value_columns(pred)
 
 
 # --- Helper: Top picks by position ---
-def show_top_by_position(df, col, top_n=10, gk_n=3):
+def show_top_by_position(df, top_n=10, gk_n=3):
     pos_map = {"GKP": gk_n, "DEF": top_n, "MID": top_n, "FWD": top_n}
     result = {}
     for pos, n in pos_map.items():
-        subset = df[df["pos"] == pos].sort_values(col, ascending=False).head(n)
-        result[pos] = subset[["web_name", "pos", "team_name", "now_cost", "form", col]]
+        subset = df[df["pos"] == pos].sort_values("xPts", ascending=False).head(n)
+        result[pos] = subset
     return result
 
 
 # --- Captaincy Picks ---
 st.subheader("🎯 Captaincy picks (Top by xPts per position)")
 
-captaincy_tables = show_top_by_position(pred, "xPts", top_n=10, gk_n=3)
+captaincy_tables = show_top_by_position(pred, top_n=10, gk_n=3)
 for pos, table in captaincy_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts**")
-    st.dataframe(table.reset_index(drop=True))
+
+    if pos in ["MID", "FWD"]:
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "xPts"]
+    elif pos == "DEF":
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts"]
+    elif pos == "GKP":
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "cs_prob", "xSaves", "xPts"]
+    else:
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xPts"]
+
+    st.dataframe(table[display_cols].reset_index(drop=True))
+
 
 # --- Value Picks ---
 st.subheader("💼 Value picks (Top by xPts per million per position)")
 
-value_tables = show_top_by_position(pred, "xPts_per_m", top_n=10, gk_n=3)
+value_tables = show_top_by_position(pred, top_n=10, gk_n=3)
 for pos, table in value_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts per million**")
-    st.dataframe(table.reset_index(drop=True))
+
+    if pos in ["MID", "FWD"]:
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "xPts_per_m"]
+    elif pos == "DEF":
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts_per_m"]
+    elif pos == "GKP":
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "cs_prob", "xSaves", "xPts_per_m"]
+    else:
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "xPts_per_m"]
+
+    st.dataframe(table[display_cols].reset_index(drop=True))
 
 
 # --- Analyze My Squad ---
@@ -111,58 +132,5 @@ if len(squad_ids) == 15:
     captain = best_xi.iloc[0]["web_name"]
     vice_captain = best_xi.iloc[1]["web_name"]
     st.success(f"⭐ Recommended Captain: **{captain}** | Vice Captain: **{vice_captain}**")
-
-    # --- Transfer Suggestions ---
-    st.markdown("---")
-    st.subheader("🔁 Suggested Transfers")
-
-    current_xi_pts = best_xi["xPts"].sum()
-
-    best_gain = 0
-    best_transfer = None
-
-    for out_id in squad_ids:
-        out_player = pred[pred["id"] == out_id].iloc[0]
-        budget_available = bank * 10 + out_player["now_cost"]  # £m → tenths of m
-
-        # Candidates in same position
-        candidates = pred[
-            (pred["pos"] == out_player["pos"]) &
-            (~pred["id"].isin(squad_ids)) &
-            (pred["now_cost"] <= budget_available)
-        ]
-
-        if candidates.empty:
-            continue
-
-        in_player = candidates.sort_values("xPts", ascending=False).iloc[0]
-
-        # Simulate transfer
-        new_squad_ids = [pid for pid in squad_ids if pid != out_id] + [in_player["id"]]
-        new_squad_df = pred[pred["id"].isin(new_squad_ids)]
-
-        new_xi = []
-        new_xi.append(new_squad_df[new_squad_df["pos"] == "GKP"].sort_values("xPts", ascending=False).head(1))
-        new_xi.append(new_squad_df[new_squad_df["pos"] == "DEF"].sort_values("xPts", ascending=False).head(3))
-        new_xi.append(new_squad_df[new_squad_df["pos"] == "MID"].sort_values("xPts", ascending=False).head(4))
-        new_xi.append(new_squad_df[new_squad_df["pos"] == "FWD"].sort_values("xPts", ascending=False).head(3))
-        new_xi = pd.concat(new_xi).head(11)
-
-        new_pts = new_xi["xPts"].sum()
-        gain = new_pts - current_xi_pts
-
-        if gain > best_gain:
-            best_gain = gain
-            best_transfer = (out_player, in_player, new_pts)
-
-    if best_transfer:
-        out_p, in_p, new_pts = best_transfer
-        st.success(
-            f"💡 Suggested transfer: **{out_p['web_name']} ➝ {in_p['web_name']}** "
-            f"(+{best_gain:.2f} xPts, new XI total = {new_pts:.2f})"
-        )
-        st.caption(f"Cost: {out_p['now_cost']/10:.1f} ➝ {in_p['now_cost']/10:.1f}, Bank used ≤ {bank:.1f}")
-    else:
-        st.info("No beneficial transfer found within your bank & squad constraints.")
 else:
     st.info("Please select exactly 15 players to analyze transfers.")

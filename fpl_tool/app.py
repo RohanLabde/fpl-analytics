@@ -30,11 +30,8 @@ def load_fixtures():
 def format_for_display(df, cols):
     out = df.copy()
     if "now_cost" in out.columns:
-        out["now_cost"] = out["now_cost"] / 10  # convert to millions
-        out.rename(columns={"now_cost": "£m"}, inplace=True)
-    if "selected_by_percent" in out.columns:
-        out["sel_by_%"] = out["selected_by_percent"].astype(float)
-    return out[cols]
+        out["£m"] = out["now_cost"] / 10  # convert tenths → millions
+    return out[[c for c in cols if c in out.columns]]
 
 
 # --- Streamlit UI ---
@@ -79,15 +76,15 @@ for pos, table in captaincy_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "£m", "xAttack", "att_factor", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "xPts_per_m"]
     elif pos == "DEF":
-        display_cols = ["web_name", "team_name", "pos", "£m", "xAttack", "cs_prob", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "cs_prob"]
     elif pos == "GKP":
-        display_cols = ["web_name", "team_name", "pos", "£m", "cs_prob", "xSaves", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "cs_prob", "xSaves"]
     else:
-        display_cols = ["web_name", "team_name", "pos", "£m", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts"]
 
-    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True))
+    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True), use_container_width=True)
 
 
 # --- Value Picks ---
@@ -98,22 +95,22 @@ for pos, table in value_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts per million**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "£m", "xAttack", "att_factor", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "xPts_per_m"]
     elif pos == "DEF":
-        display_cols = ["web_name", "team_name", "pos", "£m", "xAttack", "cs_prob", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "xPts_per_m", "cs_prob"]
     elif pos == "GKP":
-        display_cols = ["web_name", "team_name", "pos", "£m", "cs_prob", "xSaves", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts", "xPts_per_m", "cs_prob", "xSaves"]
     else:
-        display_cols = ["web_name", "team_name", "pos", "£m", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xPts_per_m"]
 
-    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True))
+    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True), use_container_width=True)
 
 
 # --- Analyze My Squad ---
 st.subheader("🧩 Analyze My 15-man Squad")
 
 player_options = {
-    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10}m)"
+    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10}m, {r.sel_by_:.1f}%)"
     for r in pred.itertuples()
 }
 
@@ -137,7 +134,8 @@ if len(squad_ids) == 15:
     best_xi = pd.concat(best_xi).sort_values("xPts", ascending=False).head(11)
 
     st.markdown("### ✅ Best XI (sorted by xPts):")
-    st.dataframe(format_for_display(best_xi, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts"]))
+    st.dataframe(format_for_display(best_xi, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts"]),
+                 use_container_width=True)
 
     captain = best_xi.iloc[0]["web_name"]
     vice_captain = best_xi.iloc[1]["web_name"]
@@ -146,7 +144,8 @@ if len(squad_ids) == 15:
     # Subs
     subs = squad_df[~squad_df["id"].isin(best_xi["id"])].sort_values("xPts", ascending=False)
     st.markdown("### 🪑 Subs (bench, sorted by xPts):")
-    st.dataframe(format_for_display(subs, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts"]))
+    st.dataframe(format_for_display(subs, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts"]),
+                 use_container_width=True)
 
     # --- Transfer Suggestions ---
     st.markdown("---")

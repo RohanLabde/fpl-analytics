@@ -16,8 +16,8 @@ def load_fpl_data():
     teams = pd.DataFrame(data["teams"])
     element_types = pd.DataFrame(data["element_types"])
 
-    # Ensure selection % is numeric and available as sel_by_%
-    players["sel_by_%"] = players["selected_by_percent"].astype(float)
+    # Add selection %
+    players["sel_by"] = players["selected_by_percent"].astype(float)
 
     return players, teams, element_types
 
@@ -34,8 +34,8 @@ def format_for_display(df, cols):
     out = df.copy()
     if "now_cost" in out.columns:
         out["£m"] = out["now_cost"] / 10  # convert to millions
-    if "sel_by_%" in out.columns:
-        out["sel_by_%"] = out["sel_by_%"].astype(float)
+    if "sel_by" in out.columns:
+        out["sel_by_%"] = out["sel_by"].astype(float).map(lambda x: f"{x:.1f}%")
     return out[cols]
 
 
@@ -115,7 +115,7 @@ for pos, table in value_tables.items():
 st.subheader("🧩 Analyze My 15-man Squad")
 
 player_options = {
-    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10}m, {r.sel_by_%:.1f}%)"
+    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10:.1f}m, {r.sel_by:.1f}%)"
     for r in pred.itertuples()
 }
 

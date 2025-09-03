@@ -50,12 +50,22 @@ pred = v2_expected_points(pm, fixtures, teams, horizon=horizon)
 pred = add_value_columns(pred)
 
 
+# --- Helper: format for display ---
+def format_for_display(df, cols):
+    df = df.copy()
+    if "now_cost" in df.columns:
+        df["now_cost"] = (df["now_cost"] / 10).round(1)  # show as £m
+    if "selected_by_percent" in df.columns:
+        df["sel_by_%"] = df["selected_by_percent"].astype(float).round(1)  # selection %
+    return df[cols]
+
+
 # --- Helper: Top picks by position ---
-def show_top_by_position(df, sort_col="xPts", top_n=10, gk_n=3):
+def show_top_by_position(df, top_n=10, gk_n=3):
     pos_map = {"GKP": gk_n, "DEF": top_n, "MID": top_n, "FWD": top_n}
     result = {}
     for pos, n in pos_map.items():
-        subset = df[df["pos"] == pos].sort_values(sort_col, ascending=False).head(n)
+        subset = df[df["pos"] == pos].sort_values("xPts", ascending=False).head(n)
         result[pos] = subset
     return result
 
@@ -63,46 +73,46 @@ def show_top_by_position(df, sort_col="xPts", top_n=10, gk_n=3):
 # --- Captaincy Picks ---
 st.subheader("🎯 Captaincy picks (Top by xPts per position)")
 
-captaincy_tables = show_top_by_position(pred, sort_col="xPts", top_n=10, gk_n=3)
+captaincy_tables = show_top_by_position(pred, top_n=10, gk_n=3)
 for pos, table in captaincy_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "att_factor", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xAttack", "att_factor", "xPts"]
     elif pos == "DEF":
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xAttack", "cs_prob", "xPts"]
     elif pos == "GKP":
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "cs_prob", "xSaves", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "cs_prob", "xSaves", "xPts"]
     else:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xPts"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xPts"]
 
-    st.dataframe(table[display_cols].reset_index(drop=True))
+    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True))
 
 
 # --- Value Picks ---
 st.subheader("💼 Value picks (Top by xPts per million per position)")
 
-value_tables = show_top_by_position(pred, sort_col="xPts_per_m", top_n=10, gk_n=3)
+value_tables = show_top_by_position(pred, top_n=10, gk_n=3)
 for pos, table in value_tables.items():
     st.markdown(f"**Top {len(table)} {pos}s by xPts per million**")
 
     if pos in ["MID", "FWD"]:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "att_factor", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xAttack", "att_factor", "xPts_per_m"]
     elif pos == "DEF":
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xAttack", "cs_prob", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xAttack", "cs_prob", "xPts_per_m"]
     elif pos == "GKP":
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "cs_prob", "xSaves", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "cs_prob", "xSaves", "xPts_per_m"]
     else:
-        display_cols = ["web_name", "team_name", "pos", "now_cost", "xPts_per_m"]
+        display_cols = ["web_name", "team_name", "pos", "now_cost", "sel_by_%", "xPts_per_m"]
 
-    st.dataframe(table[display_cols].reset_index(drop=True))
+    st.dataframe(format_for_display(table, display_cols).reset_index(drop=True))
 
 
 # --- Analyze My Squad ---
 st.subheader("🧩 Analyze My 15-man Squad")
 
 player_options = {
-    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10}m)"
+    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{r.now_cost/10}m, {r.selected_by_percent}% selected)"
     for r in pred.itertuples()
 }
 
@@ -127,7 +137,7 @@ if len(squad_ids) == 15:
     best_xi = pd.concat(best_xi).sort_values("xPts", ascending=False).head(11)
 
     st.markdown("### ✅ Best XI (sorted by xPts):")
-    st.dataframe(best_xi[["web_name", "pos", "team_name", "now_cost", "xPts"]])
+    st.dataframe(format_for_display(best_xi, ["web_name", "pos", "team_name", "now_cost", "sel_by_%", "xPts"]))
 
     captain = best_xi.iloc[0]["web_name"]
     vice_captain = best_xi.iloc[1]["web_name"]

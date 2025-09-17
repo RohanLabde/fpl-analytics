@@ -1,183 +1,208 @@
-# fpl_tool/model.py
+# model.py
 import pandas as pd
 import numpy as np
+from typing import Tuple
 
 def build_player_master(players: pd.DataFrame, teams: pd.DataFrame, element_types: pd.DataFrame) -> pd.DataFrame:
     """Build enriched player DataFrame with team + position labels."""
     df = players.copy()
-
-    # Map team name and position (short labels: GKP, DEF, MID, FWD)
     team_map = teams.set_index("id")["name"].to_dict()
     pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
 
     df["team_name"] = df["team"].map(team_map)
     df["pos"] = df["element_type"].map(pos_map)
-
     return df
 
 
-def _safe_get_series(df: pd.DataFrame, col: str, default=0.0):
-    """Return numeric series if column exists, else a constant series(default)."""
-    if col in df.columns:
-        return pd.to_numeric(df[col], errors="coerce").fillna(default)
-    else:
-        return pd.Series([default] * len(df), index=df.index)
+def _safe_numeric(s: pd.Series) -> pd.Series:
+    return pd.to_numeric(s, errors="coerce").fillna(0.0)
 
 
-def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
+def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5,
+                       prior_minutes: float = 270.0) -> pd.DataFrame:
     """
-    Robust expected points model with fallbacks.
+    Smarter expected points model with shrinkage for per-90 rates and horizon-aware totals.
 
-    Produces:
-      - xPts_per_match : expected points in a single full match (avg over next N fixtures)
-      - xPts_total     : expected points scaled by player's projected matches (minutes/90 clipped to horizon)
-      - xPts           : alias to xPts_total (keeps backward compatibility)
-      - att_factor, cs_prob, xSaves (proxies)
+    Returns DataFrame with additional columns:
+      - xAttack_per90 (shrunk)
+      - xSaves_per90 (shrunk)
+      - games_proj (min(horizon, minutes/90))
+      - xPts_per_match  (expected points next match)
+      - xPts_total      (expected points across horizon)
+      - cs_prob, att_factor (fixture-based)
     """
-
     df = players.copy()
 
-    # --- numeric fields (with safe defaults) ---
-    minutes = _safe_get_series(df, "minutes", 0.0)
-    goals = _safe_get_series(df, "goals_scored", 0.0)
-    assists = _safe_get_series(df, "assists", 0.0)
-    ict = _safe_get_series(df, "ict_index", 0.0)  # influence/threat proxy if available
-    # FPL doesn't expose xG/xA by default — try these column names if present:
-    xg90 = _safe_get_series(df, "expected_goals_per_90", 0.0)
-    xa90 = _safe_get_series(df, "expected_assists_per_90", 0.0)
-    saves90 = _safe_get_series(df, "saves_per_90", 0.0)
+    # Normalize / ensure numeric columns exist
+    df["minutes"] = _safe_numeric(df.get("minutes", pd.Series(dtype=float)))
+    # source per-90 features from API (names may differ across feeds — try common ones)
+    # fallback to 0 if not present
+    df["expected_goals_per_90"] = _safe_numeric(df.get("expected_goals_per_90", pd.Series(dtype=float)))
+    df["expected_assists_per_90"] = _safe_numeric(df.get("expected_assists_per_90", pd.Series(dtype=float)))
+    df["saves_per_90"] = _safe_numeric(df.get("saves_per_90", pd.Series(dtype=float)))
 
-    # Projected matches from minutes
-    games_proj = (minutes / 90.0).clip(lower=0.0, upper=horizon)
+    # ===== Shrinkage =====
+    # Prior = population mean of each per90 metric
+    # prior_minutes is k (equivalent minutes of prior) — default ~270 (3 full matches)
+    k = float(prior_minutes)
 
-    # If xG/xA exist, use them. Otherwise construct a robust per-90 attacking proxy:
-    # fallback_attack_per90 = (goals + assists) per 90 based on minutes, with smoothing + ict scaling
-    with np.errstate(divide='ignore', invalid='ignore'):
-        observed_rate = (goals + assists) / (minutes / 90.0)
-    # replace infinities / NaN with 0
-    observed_rate = observed_rate.replace([np.inf, -np.inf], 0.0).fillna(0.0)
+    # Compute global means (use simple mean; could use median)
+    g_xg = df["expected_goals_per_90"].mean() if not df["expected_goals_per_90"].empty else 0.0
+    g_xa = df["expected_assists_per_90"].mean() if not df["expected_assists_per_90"].empty else 0.0
+    g_saves = df["saves_per_90"].mean() if not df["saves_per_90"].empty else 0.0
 
-    # Combine: prefer xg90+xa90 if they exist (non-zero), else use smoothed observed_rate scaled by ict
-    attack_proxy_per90 = np.where(
-        (xg90 + xa90) > 0,
-        xg90 + xa90,
-        # fallback: use smoothed observed rate (regularize small-minute players)
-        (observed_rate * 0.6) + (ict * 0.02)
-    )
+    # Avoid division by zero later; create minutes series
+    mins = df["minutes"].astype(float)
 
-    # Cap attack proxy to a reasonable maximum (avoid extreme outliers)
-    attack_proxy_per90 = np.minimum(attack_proxy_per90, 3.0)  # 3 xG+xA per 90 is extreme upper bound
+    # Shrink per-90 using minutes as weight
+    df["expected_goals_per_90_shrunk"] = (df["expected_goals_per_90"] * mins + g_xg * k) / (mins + k)
+    df["expected_assists_per_90_shrunk"] = (df["expected_assists_per_90"] * mins + g_xa * k) / (mins + k)
+    df["saves_per_90_shrunk"] = (df["saves_per_90"] * mins + g_saves * k) / (mins + k)
 
-    # Save proxies into df for debugging / display
-    df["xAttack_per90"] = attack_proxy_per90
-    df["xSaves_per90"] = saves90
+    # If minutes are zero, the formula returns the global mean (which is desirable).
 
-    # prepare fixture columns
-    if "kickoff_time" in fixtures.columns:
-        try:
-            fixtures = fixtures.copy()
-            fixtures["kickoff_time"] = pd.to_datetime(fixtures["kickoff_time"], errors="coerce")
-        except Exception:
-            pass
+    # ===== Projected games & minutes over horizon =====
+    # Rough proxy: games we expect the player to feature in across the horizon
+    # Using minutes / 90 as a proxy for past usage, but cap at horizon
+    df["games_proj"] = (mins / 90.0).clip(upper=horizon)
+    # if a player hasn't played but the team has N fixtures, we still allow up to horizon for totals
+    # but games_proj derived by minutes preserves low-minute players from over-inflation
+    df["minutes_proj"] = df["games_proj"] * 90.0
 
-    xPts_per_match_list = []
-    xPts_total_list = []
-    att_factor_list = []
-    cs_prob_list = []
-    xSaves_list = []
+    # ===== Fixture-based adjustments (clean-sheet prob and attack factor) =====
+    # We'll compute per-team averages over the next `horizon` fixtures.
+    # Precompute team fixture slices for speed.
+    cs_probs = []
+    att_factors = []
 
-    for idx, player in df.iterrows():
-        team_id = player.get("team", None)
-        # next N fixtures for the team
+    # convert kickoff_time to sortable if necessary (some fixtures may have strings)
+    # don't modify original fixtures; assume columns team_h, team_a, team_h_difficulty, team_a_difficulty exist
+    for _, player in df.iterrows():
+        team_id = player["team"]
         team_fixt = fixtures[
-            (fixtures.get("team_h") == team_id) | (fixtures.get("team_a") == team_id)
+            (fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)
         ].sort_values("kickoff_time").head(horizon)
 
-        per_fixture_pts = []
-        per_fixture_att = []
-        per_fixture_cs = []
-        per_fixture_saves = []
-
+        fixture_cs = []
+        fixture_att = []
         for _, fx in team_fixt.iterrows():
-            # read difficulty (fallback to 3)
-            if fx.get("team_h") == team_id:
-                diff = fx.get("team_h_difficulty", fx.get("difficulty", 3))
+            if fx["team_h"] == team_id:
+                diff = fx.get("team_h_difficulty", 3)
             else:
-                diff = fx.get("team_a_difficulty", fx.get("difficulty", 3))
+                diff = fx.get("team_a_difficulty", 3)
+            # clean-sheet proxy: lower difficulty → higher CS probability
+            cs_prob = max(0.05, (5 - diff) / 5.0)  # baseline 0.05
+            fixture_cs.append(cs_prob)
+            # attack factor: inverse of difficulty (heuristic)
+            att_factor = 1.0 + (3.0 - diff) * 0.1
+            fixture_att.append(att_factor)
 
-            # clean sheet proxy (simple heuristic; replace with Poisson if you have team xGA)
-            cs_prob = max(0.05, (5.0 - float(diff)) / 5.0)
+        avg_cs = float(np.mean(fixture_cs)) if fixture_cs else 0.2
+        avg_att = float(np.mean(fixture_att)) if fixture_att else 1.0
+        cs_probs.append(avg_cs)
+        att_factors.append(avg_att)
 
-            # attack factor based on difficulty (capped)
-            att_factor = 1.0 + (3.0 - float(diff)) * 0.10
-            att_factor = float(np.clip(att_factor, 0.6, 1.4))
+    df["cs_prob"] = cs_probs
+    df["att_factor"] = att_factors
 
-            # per-match attack and saves
-            xAttack_one = float(player["xAttack_per90"]) * att_factor
-            xSaves_one = float(player["xSaves_per90"]) * att_factor
+    # ===== Compute attack & saves projections =====
+    # xAttack_per90 uses shrunk per90 rates
+    df["xAttack_per90"] = df["expected_goals_per_90_shrunk"] + df["expected_assists_per_90_shrunk"]
+    # xAttack_per_match (expected goals+assists in a single match) is approx per90*1.0
+    df["xAttack_per_match"] = df["xAttack_per90"]  # per-match baseline
 
-            # per-position per-match expected points
-            pos = player.get("pos", "")
-            if pos in ["FWD", "MID"]:
-                pts_one = xAttack_one + 2.0  # include appearance points for full match
-            elif pos == "DEF":
-                pts_one = xAttack_one + (cs_prob * 4.0) + 2.0
-            elif pos == "GKP":
-                pts_one = (cs_prob * 4.0) + (xSaves_one * 0.33) + 2.0
-            else:
-                pts_one = 2.0
+    # Adjust for fixture attack factor when computing totals (multiply per_match by att_factor)
+    df["xAttack_adj_per_match"] = df["xAttack_per_match"] * df["att_factor"]
 
-            per_fixture_pts.append(pts_one)
-            per_fixture_att.append(att_factor)
-            per_fixture_cs.append(cs_prob)
-            per_fixture_saves.append(xSaves_one)
+    # xSaves_per_match
+    df["xSaves_per90"] = df["saves_per_90_shrunk"]
+    df["xSaves_per_match"] = df["xSaves_per90"]  # one match baseline
 
-        # if there are fixtures, average them; otherwise neutral defaults
-        if len(per_fixture_pts) > 0:
-            x_per_match = float(np.mean(per_fixture_pts))
-            avg_att = float(np.mean(per_fixture_att))
-            avg_cs = float(np.mean(per_fixture_cs))
-            avg_saves = float(np.mean(per_fixture_saves))
+    # ===== Position-specific expected points per match (shrunk, robust) =====
+    # We'll use:
+    #  - attackers: direct attacking contributions per match + appearance points (2)
+    #  - defenders: attacking contribution per match + clean-sheet expected pts + appearance pts
+    #  - keepers: clean-sheet expected pts + saves contribution + appearance pts
+    # points mapping:
+    #   - goal/assist converted into expected FPL points via xAttack (approx 1 goal~4, assist~3) — but here we assume APIs already give xG/xA in FPL points units? 
+    #   For simplicity we convert: 1 xG ≈ 4 FPL points, 1 xA ≈ 3 FPL points (you can tune)
+    # We'll apply multipliers to convert xAttack to FPL points per match.
+    GOAL_TO_POINTS = 4.0
+    ASSIST_TO_POINTS = 3.0
+    # approximate conversion for per90 metrics -> xPts contribution per match:
+    df["xG_points_per_match"] = df["expected_goals_per_90_shrunk"] * GOAL_TO_POINTS
+    df["xA_points_per_match"] = df["expected_assists_per_90_shrunk"] * ASSIST_TO_POINTS
+    df["xAttack_points_per_match"] = df["xG_points_per_match"] + df["xA_points_per_match"]
+
+    # saves: assume 1 save -> 1 pt in FPL, xSaves_per_match is per-match expected saves
+    df["xSaves_points_per_match"] = df["xSaves_per_match"] * 1.0
+
+    # clean sheet value: defenders & GK get 4 points (approx) per clean sheet; multiply by cs_prob
+    CS_POINTS = 4.0
+
+    # appearance points: simple heuristic — 2 points per appearance (starter/appearance) scaled by appearance probability
+    # appearance_prob_per_match ≈ games_proj/horizon if horizon>0 else 0 (safe)
+    df["appearance_prob"] = 0.0
+    if horizon > 0:
+        df["appearance_prob"] = (df["games_proj"] / float(horizon)).clip(upper=1.0)
+    else:
+        df["appearance_prob"] = (df["games_proj"]).clip(upper=1.0)
+
+    # compute per-match expected points
+    per_match_pts = []
+    total_pts = []
+
+    for _, r in df.iterrows():
+        base_attack_pts = r["xAttack_points_per_match"] * r["att_factor"]  # adjust by fixture attack factor
+        saves_pts = r["xSaves_points_per_match"]
+        cs_pts_per_match = r["cs_prob"] * CS_POINTS
+
+        ap = r["appearance_prob"]
+        # position-specific
+        if r["pos"] in ["FWD", "MID"]:
+            # attackers: attack pts scaled by appearance probability + appearance pts
+            xpm = base_attack_pts * ap + (2.0 * ap)
+            # total across horizon: use games_proj to scale
+            xtot = base_attack_pts * r["games_proj"] + (2.0 * r["games_proj"])
+        elif r["pos"] == "DEF":
+            # defenders: attack + cs + appearance
+            xpm = (base_attack_pts * ap) + (cs_pts_per_match * ap) + (2.0 * ap)
+            xtot = (base_attack_pts * r["games_proj"]) + (cs_pts_per_match * r["games_proj"]) + (2.0 * r["games_proj"])
+        elif r["pos"] == "GKP":
+            # keepers: cs + saves + appearance
+            xpm = (cs_pts_per_match * ap) + (saves_pts * ap) + (2.0 * ap)
+            xtot = (cs_pts_per_match * r["games_proj"]) + (saves_pts * r["games_proj"]) + (2.0 * r["games_proj"])
         else:
-            x_per_match = 0.0
-            avg_att = 1.0
-            avg_cs = 0.0
-            avg_saves = 0.0
+            # fallback: appearance points only
+            xpm = 2.0 * ap
+            xtot = 2.0 * r["games_proj"]
 
-        proj_matches = float(games_proj.loc[idx]) if idx in games_proj.index else 0.0
-        # total expected across player's projected matches (not simply sum of fixtures)
-        x_total_scaled = x_per_match * proj_matches
+        per_match_pts.append(float(xpm))
+        total_pts.append(float(xtot))
 
-        xPts_per_match_list.append(x_per_match)
-        xPts_total_list.append(x_total_scaled)
-        att_factor_list.append(avg_att)
-        cs_prob_list.append(avg_cs)
-        xSaves_list.append(avg_saves * proj_matches)
+    df["xPts_per_match"] = per_match_pts
+    df["xPts_total"] = total_pts
 
-    df["xPts_per_match"] = xPts_per_match_list
-    df["xPts_total"] = xPts_total_list
-    df["att_factor"] = att_factor_list
-    df["cs_prob"] = cs_prob_list
-    df["xSaves"] = xSaves_list
+    # convenience: value metrics (per million)
+    df["now_cost"] = df.get("now_cost", 0)  # tenths of million
+    # avoid div by zero
+    df["price_m"] = df["now_cost"].replace({0: np.nan}) / 10.0
+    df["xPts_per_m"] = df["xPts_total"] / df["price_m"]
+    df["xPts_per_m_match"] = df["xPts_per_match"] / df["price_m"]
 
-    # compatibility alias
-    df["xPts"] = df["xPts_total"]
+    # tidy: fill NaNs where division by zero occurred
+    df["xPts_per_m"] = df["xPts_per_m"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    df["xPts_per_m_match"] = df["xPts_per_m_match"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    # attach games_proj
-    df["games_proj"] = games_proj
-
-    return df
-
-
-def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Add value metrics and safe price handling."""
-    out = df.copy()
-    out["price_m"] = (out.get("now_cost", 0.0) / 10.0).replace(0, np.nan)
-
-    out["xPts_per_m"] = (out.get("xPts", 0.0)).fillna(0.0) / out["price_m"]
-    out["xPts_per_m_match"] = (out.get("xPts_per_match", 0.0)).fillna(0.0) / out["price_m"]
-
-    out["xPts_per_m"] = out["xPts_per_m"].fillna(0.0)
-    out["xPts_per_m_match"] = out["xPts_per_m_match"].fillna(0.0)
-
-    return out
+    # Keep helpful columns
+    keep_cols = [
+        "id", "web_name", "team", "team_name", "pos", "now_cost", "selected_by_percent",
+        "minutes", "games_proj", "minutes_proj",
+        "expected_goals_per_90_shrunk", "expected_assists_per_90_shrunk", "xAttack_per90",
+        "xAttack_per_match", "att_factor", "cs_prob", "xSaves_per_match",
+        "appearance_prob", "xPts_per_match", "xPts_total",
+        "xPts_per_m", "xPts_per_m_match"
+    ]
+    # some columns may not exist in every dataset; include intersection
+    keep_cols = [c for c in keep_cols if c in df.columns]
+    return df.copy()

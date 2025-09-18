@@ -16,7 +16,6 @@ def load_fpl_data():
     teams = pd.DataFrame(data["teams"])
     element_types = pd.DataFrame(data["element_types"])
 
-    # Keep original selected_by_percent column if present
     return players, teams, element_types
 
 
@@ -30,32 +29,32 @@ def load_fixtures():
 # --- Format helper ---
 def format_for_display(df, cols):
     out = df.copy()
-    # convert now_cost (tenths) to £m, created as column '£m'
-    if "now_cost" in out.columns and "£m" not in out.columns:
-        out["£m"] = out["now_cost"] / 10.0
 
-    # selected_by_percent -> pretty percentage column 'sel_by_%'
-    if "selected_by_percent" in out.columns and "sel_by_%" not in out.columns:
-        out["sel_by_%"] = pd.to_numeric(out["selected_by_percent"], errors="coerce").fillna(0.0).map(lambda x: f"{x:.1f}%")
+    # Round numeric columns used for display
+    round_cols = [
+        "xPts_per_match", "xPts_total", "xPts_per_m", "xAttack_per90", "xSaves_per_match",
+        "cs_prob", "att_factor", "xPts_per_m_match"
+    ]
+    for rc in round_cols:
+        if rc in out.columns:
+            out[rc] = pd.to_numeric(out[rc], errors="coerce").round(3)
 
-    # round common x columns for neat display
-    for c in ["xPts_per_match", "xPts_total", "xPts_per_m", "xPts_per_m_match", "xAttack_per90", "xSaves_per_match", "cs_prob"]:
-        if c in out.columns:
-            out[c] = out[c].astype(float).round(3)
+    # Ensure sel_by_% and £m look nice (they should exist on pred already)
+    if "sel_by_%" in out.columns:
+        # Already prettified when created on pred; keep as-is
+        pass
+    if "£m" in out.columns:
+        out["£m"] = pd.to_numeric(out["£m"], errors="coerce").round(1)
 
-    # Ensure requested columns exist, otherwise keep only existing ones in that order
+    # final safe col selection
     final_cols = [c for c in cols if c in out.columns]
     return out[final_cols]
 
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="FPL Analytics – Expected Points Model", layout="wide")
-
 st.title("⚽ FPL Analytics – Smarter Expected Points")
-st.caption(
-    "Data: Official Fantasy Premier League API. "
-    "Model uses xG, xA, clean sheet probability, saves & fixture horizon adjustments."
-)
+st.caption("Data: Official Fantasy Premier League API. Model uses xG, xA, clean sheet probability, saves & fixture horizon adjustments.")
 
 # Load data
 players, teams, element_types = load_fpl_data()
@@ -80,14 +79,46 @@ rank_metric = st.sidebar.radio(
 top_n = st.sidebar.number_input("Top N per position", min_value=1, max_value=30, value=10, step=1)
 
 
-# Always use new V2 logic
+# --- Run model ---
 pred = v2_expected_points(pm, fixtures, teams, horizon=horizon, prior_minutes=float(prior_minutes))
 
-# Add compatibility mapping if model outputs alternative names
-if "xPts_per_m" in pred.columns and "xPts_per_m_match" not in pred.columns:
-    pred["xPts_per_m_match"] = pred["xPts_per_m"]
+# Make sure price and selected% are available everywhere
+# now_cost is the FPL tenths (e.g. 41 -> £4.1m). Create consistent columns for display.
+if "now_cost" in pred.columns:
+    pred["£m"] = pred["now_cost"].astype(float) / 10.0
+else:
+    # if model renamed price, attempt common alternatives
+    if "now_cost" not in pred.columns and "now_cost" in players.columns:
+        pred["£m"] = players.set_index("id")["now_cost"].reindex(pred["id"]).astype(float) / 10.0
+    else:
+        pred["£m"] = pd.NA
 
-# Optionally filter leaderboard_df to remove low-minute players
+# Add pretty selected by percent column (if raw exists)
+if "selected_by_percent" in pred.columns:
+    # keep original numeric as well, create prettier string
+    pred["selected_by_percent"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0.0)
+    pred["sel_by_%"] = pred["selected_by_percent"].map(lambda x: f"{x:.1f}%")
+else:
+    pred["selected_by_percent"] = 0.0
+    pred["sel_by_%"] = "0.0%"
+
+# Some model naming compatibility: ensure xPts_per_match and xPts_total exist
+# Many model versions used different names; create consistent names if possible.
+if "xPts_per_m" in pred.columns and "xPts_per_match" not in pred.columns:
+    pred["xPts_per_match"] = pred["xPts_per_m"]
+if "xPts" in pred.columns and "xPts_total" not in pred.columns:
+    # If xPts in your model was total, use it; else compute if per-match exists
+    if pred["xPts"].dtype != object:
+        pred["xPts_total"] = pred["xPts"]
+elif "xPts_per_match" in pred.columns and "xPts_total" not in pred.columns:
+    pred["xPts_total"] = pred["xPts_per_match"] * pred.get("proj_matches", horizon)
+
+# Safety conversions
+for col in ["xPts_per_match", "xPts_total", "xPts_per_m"]:
+    if col in pred.columns:
+        pred[col] = pd.to_numeric(pred[col], errors="coerce").fillna(0.0)
+
+# Leaderboard df (optionally hide low-minutes players)
 if hide_low_minutes and min_minutes_for_lists > 0:
     leaderboard_df = pred[pred["minutes"].fillna(0) >= min_minutes_for_lists].copy()
 else:
@@ -105,14 +136,14 @@ def top_by_position(df: pd.DataFrame, score_col: str, top_n: int = 10, gk_n: int
 
 
 # --- Captaincy Picks ---
-st.subheader("🎯 Captaincy picks (Top by {} per position)".format("per match" if rank_metric == "xPts_per_match" else "total"))
+st.subheader(f"🎯 Captaincy picks (Top by {'per match' if rank_metric == 'xPts_per_match' else 'total'} per position)")
 
 capt_tables = top_by_position(leaderboard_df, rank_metric, top_n=top_n, gk_n=3)
 
 for pos, table in capt_tables.items():
-    st.markdown(f"**Top {len(table)} {pos}s by {'per match' if rank_metric=='xPts_per_match' else 'total'}**")
+    st.markdown(f"**Top {len(table)} {pos}s by {'per match' if rank_metric == 'xPts_per_match' else 'total'}**")
 
-    # Always include price (£m) in columns
+    # Compose display columns and guarantee '£m' present
     if pos == "GKP":
         display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "cs_prob", "xSaves_per_match", rank_metric]
     elif pos == "DEF":
@@ -122,15 +153,13 @@ for pos, table in capt_tables.items():
     else:
         display_cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", rank_metric]
 
-    # Show only available columns (safe)
     display_cols = [c for c in display_cols if c in table.columns]
     st.dataframe(format_for_display(table, display_cols).reset_index(drop=True))
 
 
 # --- Value Picks ---
 st.subheader("💼 Value picks (Top by xPts per million per position)")
-
-value_score = "xPts_per_m_match" if rank_metric == "xPts_per_match" else "xPts_per_m"
+value_score = "xPts_per_m" if "xPts_per_m" in leaderboard_df.columns else ("xPts_per_match" if rank_metric == "xPts_per_match" else "xPts_total")
 value_tables = top_by_position(leaderboard_df, value_score, top_n=top_n, gk_n=3)
 
 for pos, table in value_tables.items():
@@ -153,7 +182,7 @@ for pos, table in value_tables.items():
 st.subheader("🧩 Analyze My 15-man Squad")
 
 player_options = {
-    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{(r.now_cost/10):.1f}m, {float(r.selected_by_percent) if 'selected_by_percent' in r._fields else 0:.1f}%)"
+    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{(r.now_cost/10):.1f}m, {float(r.selected_by_percent) if 'selected_by_percent' in pred.columns else 0:.1f}%)"
     for r in pred.itertuples()
 }
 
@@ -168,17 +197,17 @@ bank = st.number_input("Bank (money in the bank, £m)", min_value=0.0, step=0.1)
 if len(squad_ids) == 15:
     squad_df = pred[pred["id"].isin(squad_ids)].copy()
 
-    # Pick Best XI (heuristic: 1 GKP, 3 DEF, 4 MID, 3 FWD by per-match expected pts)
+    # Best XI by per-match (heuristic)
     best_xi = []
     best_xi.append(squad_df[squad_df["pos"] == "GKP"].sort_values("xPts_per_match", ascending=False).head(1))
     best_xi.append(squad_df[squad_df["pos"] == "DEF"].sort_values("xPts_per_match", ascending=False).head(3))
     best_xi.append(squad_df[squad_df["pos"] == "MID"].sort_values("xPts_per_match", ascending=False).head(4))
     best_xi.append(squad_df[squad_df["pos"] == "FWD"].sort_values("xPts_per_match", ascending=False).head(3))
-
     best_xi = pd.concat(best_xi).sort_values("xPts_per_match", ascending=False).head(11)
 
     st.markdown("### ✅ Best XI (sorted by xPts_per_match):")
-    st.dataframe(format_for_display(best_xi, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"]).reset_index(drop=True))
+    bcols = [c for c in ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"] if c in best_xi.columns]
+    st.dataframe(format_for_display(best_xi, bcols).reset_index(drop=True))
 
     captain = best_xi.iloc[0]["web_name"]
     vice_captain = best_xi.iloc[1]["web_name"]
@@ -186,23 +215,20 @@ if len(squad_ids) == 15:
 
     # Subs
     subs = squad_df[~squad_df["id"].isin(best_xi["id"])].sort_values("xPts_per_match", ascending=False)
+    sub_cols = [c for c in ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"] if c in subs.columns]
     st.markdown("### 🪑 Subs (bench, sorted by xPts_per_match):")
-    subs_cols = [c for c in ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"] if c in subs.columns]
-    st.dataframe(format_for_display(subs, subs_cols).reset_index(drop=True))
+    st.dataframe(format_for_display(subs, sub_cols).reset_index(drop=True))
 
-    # --- Transfer Suggestions ---
+    # Transfer suggestions: use xPts_total to evaluate change across horizon
     st.markdown("---")
     st.subheader("🔁 Suggested Transfers")
-
-    current_xi_pts = best_xi["xPts_total"].sum() if "xPts_total" in best_xi.columns else best_xi["xPts_per_match"].sum()
+    current_xi_pts_total = best_xi["xPts_total"].sum() if "xPts_total" in best_xi.columns else best_xi["xPts_per_match"].sum()
 
     transfer_candidates = []
-
     for out_id in squad_ids:
         out_player = pred[pred["id"] == out_id].iloc[0]
-        budget_available = bank * 10 + out_player["now_cost"]  # convert bank to tenths of £m
+        budget_available = bank * 10 + out_player["now_cost"]
 
-        # Candidates in same position
         candidates = pred[
             (pred["pos"] == out_player["pos"]) &
             (~pred["id"].isin(squad_ids)) &
@@ -214,7 +240,6 @@ if len(squad_ids) == 15:
 
         in_player = candidates.sort_values("xPts_total", ascending=False).iloc[0]
 
-        # Simulate transfer: replace out_id with in_player
         new_squad_ids = [pid for pid in squad_ids if pid != out_id] + [in_player["id"]]
         new_squad_df = pred[pred["id"].isin(new_squad_ids)]
 
@@ -225,36 +250,32 @@ if len(squad_ids) == 15:
         new_xi.append(new_squad_df[new_squad_df["pos"] == "FWD"].sort_values("xPts_total", ascending=False).head(3))
         new_xi = pd.concat(new_xi).head(11)
 
-        new_pts = new_xi["xPts_total"].sum()
-        gain = new_pts - current_xi_pts
+        new_pts_total = new_xi["xPts_total"].sum()
+        gain = new_pts_total - current_xi_pts_total
 
         if gain > 0:
-            transfer_candidates.append((gain, out_player, in_player, new_pts))
+            transfer_candidates.append((gain, out_player, in_player, new_pts_total))
 
     transfer_candidates = sorted(transfer_candidates, key=lambda x: x[0], reverse=True)
 
     if transfer_candidates:
         st.markdown("#### 💡 Top 2 Transfer Suggestions:")
-        for gain, out_p, in_p, new_pts in transfer_candidates[:2]:
-            st.success(
-                f"**{out_p['web_name']} ➝ {in_p['web_name']}** "
-                f"(+{gain:.2f} xPts_total, new XI total = {new_pts:.2f})"
-            )
-        # Dropdown for custom OUT
+        for gain, out_p, in_p, new_total in transfer_candidates[:2]:
+            st.success(f"**{out_p['web_name']} ➝ {in_p['web_name']}** (+{gain:.2f} xPts_total, new XI total = {new_total:.2f})")
+
         st.markdown("#### 🎯 Choose a player to transfer OUT:")
         out_choice = st.selectbox("Select player to sell", [p[1]["web_name"] for p in transfer_candidates])
         if out_choice:
             chosen = [t for t in transfer_candidates if t[1]["web_name"] == out_choice][0]
-            gain, out_p, in_p, new_pts = chosen
-            st.info(
-                f"Best replacement for **{out_p['web_name']}** ➝ **{in_p['web_name']}** "
-                f"(+{gain:.2f} xPts_total, new XI total = {new_pts:.2f})"
-            )
+            gain, out_p, in_p, new_total = chosen
+            st.info(f"Best replacement for **{out_p['web_name']}** ➝ **{in_p['web_name']}** (+{gain:.2f} xPts_total)")
+
     else:
         st.info("No beneficial transfers found within your bank & squad constraints.")
+
 else:
     st.info("Please select exactly 15 players to analyze transfers.")
 
-# Footer hint
+# Footer
 st.markdown("---")
-st.caption("Hint: use 'Min minutes' slider to hide players with tiny sample sizes from leaderboards.")
+st.caption("Note: '£m' = FPL now_cost / 10. Use the 'Min minutes' slider to exclude low-sample players from leaderboards.")

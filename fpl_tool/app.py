@@ -1,3 +1,4 @@
+# app.py
 import itertools
 import streamlit as st
 import pandas as pd
@@ -32,10 +33,18 @@ def format_for_display(df, cols):
     if "£m" in out.columns:
         out["£m"] = pd.to_numeric(out["£m"], errors="coerce").round(1)
     if "sel_by_%" in out.columns:
-        # keep already formatted strings (e.g. "12.3%")
+        # already formatted strings (e.g. "12.3%")
         pass
     # round numeric metrics for nicer display
-    for c in ["xPts_per_match", "xPts_total", "xPts_per_m", "xAttack_per90", "xSaves_per_match", "cs_prob", "att_factor"]:
+    for c in [
+        "xPts_per_match",
+        "xPts_total",
+        "xPts_per_m",
+        "xAttack_per90",
+        "xSaves_per_match",
+        "cs_prob",
+        "att_factor",
+    ]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").round(3)
     final = [c for c in cols if c in out.columns]
@@ -52,6 +61,7 @@ VALID_FORMATIONS = {
     (5, 4, 1),
 }
 
+
 def is_valid_outfield_counts(defs, mids, fwds):
     return (defs, mids, fwds) in VALID_FORMATIONS
 
@@ -62,7 +72,7 @@ def best_xi_optimal(squad_df, score_col="xPts_per_match"):
     that maximizes score_col subject to FPL formation rules:
       - exactly 1 GK
       - an outfield split that is in VALID_FORMATIONS
-    We iterate all combinations C(15,11) (1,365 combos) — cheap.
+    We iterate all combinations C(15,11) (1,365 combos).
     """
     # require id column for combinatorics
     if "id" not in squad_df.columns:
@@ -101,7 +111,6 @@ def best_xi_optimal(squad_df, score_col="xPts_per_match"):
 
     if best_combo is None:
         # fallback to greedy (shouldn't happen)
-        # 1 GK, top 10 outfield by score_col (subject to min defs 3)
         gk = squad_df[squad_df["pos"] == "GKP"].sort_values(score_col, ascending=False).head(1)
         outfield = squad_df[squad_df["pos"] != "GKP"].sort_values(score_col, ascending=False).head(10)
         return pd.concat([gk, outfield])
@@ -122,14 +131,20 @@ pm = build_player_master(players, teams, element_types)
 # Sidebar controls
 st.sidebar.header("Model + display settings")
 horizon = st.sidebar.slider("Fixture horizon (matches)", 1, 10, 5)
-rank_metric = st.sidebar.selectbox("Ranking metric for selection & leaderboards", ["xPts_per_match", "xPts_total"])
-min_minutes = st.sidebar.slider("Min minutes to include in leaderboards (0 = include all)", 0, 900, 90)
+rank_metric = st.sidebar.selectbox(
+    "Ranking metric for selection & leaderboards", ["xPts_per_match", "xPts_total"]
+)
+min_minutes = st.sidebar.slider(
+    "Min minutes to include in leaderboards (0 = include all)", 0, 900, 90
+)
 hide_low_minutes = st.sidebar.checkbox("Hide players below min-minutes in leaderboards", value=True)
 top_n = st.sidebar.number_input("Top N per position shown", min_value=1, max_value=20, value=10)
 
 # Run model (expects model to return xPts_per_match and xPts_total; add_value_columns if needed)
 pred = v2_expected_points(pm, fixtures, teams, horizon=horizon)
-pred = add_value_columns(pred) if "xPts_per_m" not in pred.columns else pred
+# add_value_columns only if model didn't add xPts_per_m
+if "xPts_per_m" not in pred.columns:
+    pred = add_value_columns(pred)
 
 # Normalize / ensure price & selected percent columns exist for display everywhere
 if "now_cost" in pred.columns:
@@ -147,7 +162,6 @@ pred["sel_by_%"] = pred["selected_by_percent"].map(lambda x: f"{x:.1f}%")
 if "xPts_per_match" not in pred.columns and "xPts_per_m" in pred.columns:
     pred["xPts_per_match"] = pred["xPts_per_m"]
 if "xPts_total" not in pred.columns:
-    # if model produced xPts as total use that; else approximate total = per_match * horizon
     if "xPts" in pred.columns and pred["xPts"].mean() > 0:
         pred["xPts_total"] = pred["xPts"]
     else:
@@ -166,18 +180,51 @@ def top_by_position(df, score_col, top_n=10, gk_n=3):
         out[pos] = df[df["pos"] == pos].sort_values(score_col, ascending=False).head(n)
     return out
 
+
 # Captaincy / leaderboards
 st.subheader(f"🎯 Captaincy picks (Top by {rank_metric} per position)")
 captains = top_by_position(leaderboard_df, rank_metric, top_n=top_n, gk_n=3)
 for pos, tbl in captains.items():
     st.markdown(f"**Top {len(tbl)} {pos}s by {rank_metric}**")
     if pos == "GKP":
-        cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "cs_prob", "xSaves_per_match", rank_metric, "xPts_total"]
+        cols = [
+            "web_name",
+            "team_name",
+            "pos",
+            "£m",
+            "sel_by_%",
+            "cs_prob",
+            "xSaves_per_match",
+            rank_metric,
+            "xPts_total",
+        ]
     elif pos == "DEF":
-        cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xAttack_per90", "att_factor", "cs_prob", rank_metric, "xPts_total"]
+        cols = [
+            "web_name",
+            "team_name",
+            "pos",
+            "£m",
+            "sel_by_%",
+            "xAttack_per90",
+            "att_factor",
+            "cs_prob",
+            rank_metric,
+            "xPts_total",
+        ]
     else:
-        cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xAttack_per90", "att_factor", rank_metric, "xPts_total"]
+        cols = [
+            "web_name",
+            "team_name",
+            "pos",
+            "£m",
+            "sel_by_%",
+            "xAttack_per90",
+            "att_factor",
+            rank_metric,
+            "xPts_total",
+        ]
     st.dataframe(format_for_display(tbl, cols).reset_index(drop=True))
+
 
 # Value picks
 st.subheader("💼 Value picks (Top by xPts_per_m per position)")
@@ -193,13 +240,21 @@ for pos, tbl in values.items():
         cols = ["web_name", "team_name", "pos", "£m", "sel_by_%", "xAttack_per90", value_score]
     st.dataframe(format_for_display(tbl, cols).reset_index(drop=True))
 
+
 # Analyze my 15-man squad
 st.subheader("🧩 Analyze My 15-man Squad")
 
-player_options = {
-    int(r.id): f"{r.web_name} ({r.team_name}, {r.pos}, £{(r.£m if '£m' in r._fields else (r.now_cost/10 if 'now_cost' in r._fields else 0))}m, {getattr(r, 'selected_by_percent', 0):.1f}%)"
-    for r in pred.itertuples()
-}
+# Build player_options with simple expressions (avoid complex inline unicode/expressions)
+player_options = {}
+for r in pred.itertuples():
+    pid = int(r.id)
+    name = getattr(r, "web_name", "")
+    team = getattr(r, "team_name", "")
+    pos = getattr(r, "pos", "")
+    price_m = getattr(r, "now_cost", 0) / 10.0 if hasattr(r, "now_cost") else 0.0
+    sel_pct = getattr(r, "selected_by_percent", 0.0)
+    label = f"{name} ({team}, {pos}, {price_m:.1f}m, {sel_pct:.1f}%)"
+    player_options[pid] = label
 
 squad_ids = st.multiselect("Select your 15 players", options=list(player_options.keys()), format_func=lambda x: player_options[x])
 bank = st.number_input("Bank (money in the bank, £m)", min_value=0.0, step=0.1)
@@ -231,7 +286,7 @@ if len(squad_ids) == 15:
         sub_cols = [c for c in ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"] if c in subs.columns]
         st.dataframe(format_for_display(subs, sub_cols).reset_index(drop=True))
 
-        # Transfers (same logic as before: single-out best replacement)
+        # Transfers (simulate single-out replacement, recompute optimal XI)
         st.markdown("---")
         st.subheader("🔁 Suggested Transfers (single out -> in)")
 
@@ -274,7 +329,6 @@ if len(squad_ids) == 15:
                 chosen = [t for t in transfer_candidates if t[1]["web_name"] == out_choice][0]
                 gain, out_p, in_p, new_total = chosen
                 st.info(f"Best replacement for **{out_p['web_name']}** ➝ **{in_p['web_name']}** (+{gain:.2f} xPts_total)")
-
         else:
             st.info("No beneficial transfer found within your constraints.")
 else:

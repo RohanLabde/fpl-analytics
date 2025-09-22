@@ -7,15 +7,24 @@ from typing import Tuple
 def build_player_master(players: pd.DataFrame, teams: pd.DataFrame, element_types: pd.DataFrame) -> pd.DataFrame:
     """
     Enrich the raw players DataFrame with team name and short position label (GKP/DEF/MID/FWD).
+    Ensures `id` is present and numeric.
     """
     df = players.copy()
-    # map team id -> name
-    team_map = teams.set_index("id")["name"].to_dict()
-    df["team_name"] = df["team"].map(team_map)
+
+    # map team id -> name (if teams provided)
+    if "id" in teams.columns and "name" in teams.columns:
+        team_map = teams.set_index("id")["name"].to_dict()
+        df["team_name"] = df["team"].map(team_map)
+    else:
+        df["team_name"] = df.get("team", np.nan)
 
     # map element_type id -> short name (singular_name_short)
-    pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
-    df["pos"] = df["element_type"].map(pos_map)
+    if "id" in element_types.columns and "singular_name_short" in element_types.columns:
+        pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
+        df["pos"] = df["element_type"].map(pos_map)
+    else:
+        # fallback: if 'element_type' already textual
+        df["pos"] = df["element_type"]
 
     # ensure id exists and is numeric
     if "id" not in df.columns:
@@ -25,25 +34,26 @@ def build_player_master(players: pd.DataFrame, teams: pd.DataFrame, element_type
     return df
 
 
-def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame, horizon: int = 5) -> pd.DataFrame:
+def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.DataFrame = None, horizon: int = 5) -> pd.DataFrame:
     """
-    Produce a DataFrame with expected-points metrics.
+    Produce expected points projections.
 
-    Important outputs (per-player):
-      - xAttack_per90        : xG + xA per 90 (raw from API if present)
-      - att_factor           : fixture-based attacking multiplier (avg over horizon)
-      - cs_prob              : fixture-based avg clean-sheet probability (per match)
-      - xSaves_per_match     : expected save points per match (per-90 * save-point-proxy)
-      - xPts_per_match       : expected fantasy points per match (modelled)
-      - xPts_total           : expected points across the chosen horizon (xPts_per_match * horizon)
-      - xPts_per_m           : value (per match) per million (added later by add_value_columns)
-    Notes:
-      - This model assumes a *per-match* projection (i.e., if a player plays 90 minutes).
-      - Use the UI min-minutes filter to remove players with too small minutes (1-min anomalies).
+    Outputs include:
+      - xAttack_per90            : xG + xA per 90 (raw if present)
+      - xAttack_per90_adj       : xAttack_per90 adjusted by fixture attack factor
+      - xAttack                 : alias for xAttack_per90_adj (convenience for UI)
+      - att_factor              : average attacking multiplier over the horizon
+      - cs_prob                 : average clean-sheet probability per match over horizon
+      - xSaves_per_match        : expected save points per match (GK)
+      - games_proj              : projected games (minutes/90) clamped to [1, horizon]
+      - xPts_per_match          : expected fantasy points per match (modelled)
+      - xPts_total              : expected points across the chosen horizon (xPts_per_match * games_proj)
+      - price_m                 : price in millions
+      - selected_by_percent     : numeric selection percentage
     """
     df = players.copy()
 
-    # ------------- ensure numeric columns exist -------------
+    # --- ensure numeric columns exist ---
     numeric_cols = [
         "expected_goals_per_90",
         "expected_assists_per_90",
@@ -58,20 +68,23 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
         else:
             df[col] = 0.0
 
-    # base attacking metric (per 90)
+    # base attacking per-90
     df["xAttack_per90"] = df["expected_goals_per_90"] + df["expected_assists_per_90"]
 
-    # compute fixture-based multipliers (att_factor and cs_prob) using upcoming fixtures
+    # --- fixture-based multipliers (att_factor, cs_prob) ---
     att_factors = []
     cs_probs = []
 
-    # make sure fixture difficulty columns exist; if not, fallback to neutral difficulty = 3
-    fixtures = fixtures.copy()
-    if "team_h_difficulty" not in fixtures.columns or "team_a_difficulty" not in fixtures.columns:
-        fixtures["team_h_difficulty"] = 3
-        fixtures["team_a_difficulty"] = 3
+    fixtures = fixtures.copy() if fixtures is not None else pd.DataFrame()
+    # fallback: neutral difficulties if not present
+    if fixtures is not None and not fixtures.empty:
+        if "team_h_difficulty" not in fixtures.columns or "team_a_difficulty" not in fixtures.columns:
+            fixtures["team_h_difficulty"] = 3
+            fixtures["team_a_difficulty"] = 3
+    else:
+        fixtures = pd.DataFrame(columns=["team_h", "team_a", "team_h_difficulty", "team_a_difficulty", "kickoff_time"])
 
-    # iterate players to compute average across next `horizon` fixtures
+    # compute per-player average attack factor and cs prob across next `horizon` fixtures
     for _, player in df.iterrows():
         team_id = player.get("team", None)
         if pd.isna(team_id):
@@ -79,86 +92,88 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
             cs_probs.append(0.25)
             continue
 
+        # select fixtures for that team (home or away)
         team_fixt = fixtures[
             (fixtures["team_h"] == team_id) | (fixtures["team_a"] == team_id)
         ].copy()
 
-        # sort by kickoff_time if present else by index
+        # sort by kickoff_time if available
         if "kickoff_time" in team_fixt.columns:
             team_fixt = team_fixt.sort_values("kickoff_time")
+
         team_fixt = team_fixt.head(horizon)
 
         per_fx_att = []
         per_fx_cs = []
         for _, fx in team_fixt.iterrows():
+            # determine which difficulty field to use
             if fx.get("team_h") == team_id:
                 diff = fx.get("team_h_difficulty", 3)
             else:
                 diff = fx.get("team_a_difficulty", 3)
 
-            # translate difficulty 1-5 into clean-sheet probability and attack factor:
-            # cs_prob: (5 - diff) / 5  (clamped to min 0.05)
+            # clean-sheet probability proxy: easier difficulty -> higher cs chance
             cs_prob = max(0.05, (5.0 - float(diff)) / 5.0)
             per_fx_cs.append(cs_prob)
 
-            # attack factor: slightly >1 for easier fixtures, <1 for harder
-            att_factor = 1.0 + (3.0 - float(diff)) * 0.10  # ~0.8 to 1.2 ranges
+            # attack factor: >1 for easier, <1 for harder (small range)
+            att_factor = 1.0 + (3.0 - float(diff)) * 0.10  # approx range 0.8..1.2
             per_fx_att.append(att_factor)
 
-        # fallback defaults if no fixtures found
-        if per_fx_att:
-            att_factors.append(float(np.mean(per_fx_att)))
-        else:
-            att_factors.append(1.0)
-
-        if per_fx_cs:
-            cs_probs.append(float(np.mean(per_fx_cs)))
-        else:
-            cs_probs.append(0.25)
+        att_factors.append(float(np.mean(per_fx_att)) if per_fx_att else 1.0)
+        cs_probs.append(float(np.mean(per_fx_cs)) if per_fx_cs else 0.25)
 
     df["att_factor"] = att_factors
     df["cs_prob"] = cs_probs
 
-    # saves proxy: expected save-point contribution per match (assuming 1 save = 0.33 pts)
-    df["xSaves_per_match"] = df["saves_per_90"] * 0.33  # per 90 -> per match (90)
+    # saves proxy: convert saves_per_90 to expected save points per match (1 save ≈ 0.33 pts)
+    df["xSaves_per_match"] = df["saves_per_90"] * 0.33
 
-    # xAttack per match (attack per 90 adjusted by fixture factor)
+    # adjusted xAttack per90 after fixture factor
     df["xAttack_per90_adj"] = df["xAttack_per90"] * df["att_factor"]
-    # to keep names simple, also provide xAttack per match as same unit as per-90 but called xAttack_per90_adj
 
-    # --- Position-specific per-match expected points ---
+    # convenience alias used by older app code
+    df["xAttack"] = df["xAttack_per90_adj"]
+
+    # --- games projection (minutes -> games) ---
+    # Use minutes/90 but clamp to minimum 1 (so tiny minute-sample players are not overly ranked)
+    # and maximum horizon (we only evaluate the upcoming horizon)
+    df["games_proj"] = (pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0.0) / 90.0).clip(lower=1.0, upper=float(horizon))
+
+    # --- Position-specific expected points per match ---
     xPts_per_match = []
     for _, r in df.iterrows():
-        pos = r.get("pos", "")
-        # appearance points assumed = 2.0 for a full match (starts)
-        appearance_pts = 2.0
+        pos = (r.get("pos") or "").strip()
+        appearance_pts = 2.0  # approximate points for a (full) appearance/start
 
         if pos in ["FWD", "MID"]:
             xp = r["xAttack_per90_adj"] + appearance_pts
         elif pos == "DEF":
-            # defenders: attacking involvement + clean-sheet pts + appearance pts
             xp = r["xAttack_per90_adj"] + (r["cs_prob"] * 4.0) + appearance_pts
-        elif pos == "GKP" or pos == "GKP " or pos == "GK" or pos == "GKP":
+        elif pos in ["GKP", "GK"]:
             xp = (r["cs_prob"] * 4.0) + r["xSaves_per_match"] + appearance_pts
         else:
-            # fallback
+            # fallback: treat as midfielder-ish
             xp = r["xAttack_per90_adj"] + appearance_pts
 
         xPts_per_match.append(float(xp))
 
     df["xPts_per_match"] = xPts_per_match
 
-    # total over horizon
-    df["xPts_total"] = df["xPts_per_match"] * float(horizon)
+    # total across horizon: treat xPts_total as expected across projected matches (games_proj)
+    df["xPts_total"] = df["xPts_per_match"] * df["games_proj"]
 
-    # a simple "xPts" alias (older code might expect this)
+    # alias for backward compatibility
     df["xPts"] = df["xPts_per_match"]
 
-    # helpful columns: price (tenths to millions), selected_by_percent
-    df["price_m"] = df["now_cost"].astype(float) / 10.0
+    # price and selection columns
+    df["price_m"] = pd.to_numeric(df.get("now_cost", 0), errors="coerce").fillna(0.0) / 10.0
     df["selected_by_percent"] = pd.to_numeric(df.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
 
-    # keep expected/derived columns
+    # make sure now_cost exists as numeric
+    df["now_cost"] = pd.to_numeric(df.get("now_cost", 0), errors="coerce").fillna(0.0)
+
+    # --- choose columns to return (keep expected fields used by app) ---
     keep_cols = [
         "id",
         "web_name",
@@ -170,38 +185,41 @@ def v2_expected_points(players: pd.DataFrame, fixtures: pd.DataFrame, teams: pd.
         "minutes",
         "xAttack_per90",
         "xAttack_per90_adj",
+        "xAttack",
         "att_factor",
         "cs_prob",
         "xSaves_per_match",
+        "games_proj",
         "xPts_per_match",
         "xPts_total",
         "xPts",
     ]
-    # ensure we don't drop required columns if they don't exist
     existing = [c for c in keep_cols if c in df.columns]
     return df[existing].copy()
 
 
 def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Add value columns (xPts per million and xPts per million per match).
-    - xPts_per_m: per-match expected points divided by player price (m)
-    - xPts_per_m_total: total (horizon) expected points per million
+    Add value-for-money metrics:
+      - xPts_per_m: per-match expected points per million
+      - xPts_total_per_m: total expected points over horizon per million
     """
     out = df.copy()
-    # price in millions: prefer 'price_m' then 'now_cost'/10
+
+    # determine price in millions (use price_m first, fallback to now_cost/10)
     if "price_m" in out.columns:
-        price = out["price_m"].astype(float).replace(0, np.nan)
+        price = pd.to_numeric(out["price_m"], errors="coerce").replace(0, np.nan)
     elif "now_cost" in out.columns:
-        price = out["now_cost"].astype(float) / 10.0
+        price = pd.to_numeric(out["now_cost"], errors="coerce") / 10.0
         price = price.replace(0, np.nan)
     else:
         price = pd.Series(np.nan, index=out.index)
 
-    out["xPts_per_m"] = out["xPts_per_match"].astype(float) / price
+    # per-match value
+    out["xPts_per_m"] = out.get("xPts_per_match", 0.0).astype(float) / price
     out["xPts_per_m"] = out["xPts_per_m"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-    # horizon total-to-price (if xPts_total exists)
+    # total (horizon) value
     if "xPts_total" in out.columns:
         out["xPts_total_per_m"] = out["xPts_total"].astype(float) / price
         out["xPts_total_per_m"] = out["xPts_total_per_m"].replace([np.inf, -np.inf], np.nan).fillna(0.0)

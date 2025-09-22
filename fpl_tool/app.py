@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-# import your model functions (adjust if your module path differs)
+# import your model functions (adjust path if necessary)
 from fpl_tool.model import build_player_master, v2_expected_points
 
 # add_value_columns is optional; try to import and fall back to local calculation
@@ -23,7 +23,7 @@ except Exception:
 @st.cache_data(ttl=3600)
 def load_fpl_data():
     url = "https://fantasy.premierleague.com/api/bootstrap-static/"
-    r = requests.get(url)
+    r = requests.get(url, timeout=10)
     data = r.json()
 
     players = pd.DataFrame(data["elements"])
@@ -35,7 +35,7 @@ def load_fpl_data():
 @st.cache_data(ttl=3600)
 def load_fixtures():
     url = "https://fantasy.premierleague.com/api/fixtures/"
-    r = requests.get(url)
+    r = requests.get(url, timeout=10)
     return pd.DataFrame(r.json())
 
 
@@ -64,7 +64,6 @@ def fmt_df_for_display(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     elif "sel_by" in out.columns:
         out["sel_by_%"] = pd.to_numeric(out["sel_by"], errors="coerce").fillna(0).map(lambda x: f"{x:.1f}%")
     else:
-        # create empty col to keep display uniform when requested
         out["sel_by_%"] = ""
 
     # xPts_total fallback (some model variants use 'xPts' as total)
@@ -84,7 +83,6 @@ def fmt_df_for_display(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
                 return float(tot) / float(gp)
         except Exception:
             pass
-        # fallback try xPts
         if "xPts" in r and r.get("games_proj", 0) > 0:
             return float(r["xPts"]) / float(r["games_proj"])
         return 0.0
@@ -127,25 +125,20 @@ def build_best_xi_from_squad(squad_df: pd.DataFrame, rank_by: str = "xPts_per_ma
     if rank_by not in df.columns:
         df[rank_by] = 0.0
 
-    # ensure positions exist
     df["pos"] = df["pos"].fillna("UNK")
 
     best_total = -1e12
     best_xi = pd.DataFrame()
 
-    # GK pool
     gk_pool = df[df["pos"].isin(["GKP", "GK"])].sort_values(rank_by, ascending=False)
     if gk_pool.empty:
-        # fallback to top 11 overall
         return df.sort_values(rank_by, ascending=False).head(11)
 
     for def_c, mid_c, fwd_c in FORMATIONS:
-        # pick GK
         sel_gk = gk_pool.head(1)
         defs = df[df["pos"] == "DEF"].sort_values(rank_by, ascending=False).head(def_c)
         mids = df[df["pos"] == "MID"].sort_values(rank_by, ascending=False).head(mid_c)
         fwds = df[df["pos"] == "FWD"].sort_values(rank_by, ascending=False).head(fwd_c)
-
         combo = pd.concat([sel_gk, defs, mids, fwds])
         needed = 1 + def_c + mid_c + fwd_c
         if len(combo) != needed:
@@ -156,7 +149,6 @@ def build_best_xi_from_squad(squad_df: pd.DataFrame, rank_by: str = "xPts_per_ma
             best_xi = combo.copy()
 
     if best_xi.empty:
-        # fallback
         best_xi = df.sort_values(rank_by, ascending=False).head(11)
 
     return best_xi.sort_values(rank_by, ascending=False)
@@ -188,48 +180,38 @@ def suggest_transfers_greedy(
     current_best_xi = build_best_xi_from_squad(squad_df, rank_by)
     current_total = float(current_best_xi[rank_by].sum()) if not current_best_xi.empty else 0.0
 
-    # candidate pool (global constraints)
     def candidate_pool_mask(df: pd.DataFrame, excluded_ids: List[int]):
         m = ~df["id"].isin(excluded_ids) & (pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0) >= min_minutes)
         return m
 
     squad_list = list(squad_ids)
 
-    # all combinations of 1..max_outs
     combs = []
     for r in range(1, min(max_outs, len(squad_list)) + 1):
         combs.extend(itertools.combinations(squad_list, r))
 
     for out_combo in combs:
-        # freed budget (tenths of £m)
         try:
             freed = sum([float(pred_indexed.loc[out_id]["now_cost"]) for out_id in out_combo])
         except Exception:
             continue
         budget_available = bank * 10 + freed
-
         base_ids = [pid for pid in squad_list if pid not in out_combo]
-
-        # pool excludes base players and outs
         pool = pred[candidate_pool_mask(pred, excluded_ids=base_ids + list(out_combo))].copy()
-        # sort outs by lost value (rank_by) so we replace the most impactful outs first
         outs_rows = [pred_indexed.loc[o].to_dict() for o in out_combo]
         outs_rows_sorted = sorted(outs_rows, key=lambda r: r.get(rank_by, 0), reverse=True)
 
         chosen_ins = []
         budget_remaining = budget_available
-
-        # pick replacements greedily
         ok = True
+
         for out_row in outs_rows_sorted:
             pos = out_row.get("pos", None)
             if pos is None:
                 ok = False
                 break
-            # candidates same pos and within budget_remaining
             cands = pool[(pool["pos"] == pos) & (pool["now_cost"] <= budget_remaining)].copy()
             if cands.empty:
-                # try relaxing the budget to full available (rare)
                 cands = pool[(pool["pos"] == pos) & (pool["now_cost"] <= budget_available)].copy()
             if cands.empty:
                 ok = False
@@ -237,7 +219,6 @@ def suggest_transfers_greedy(
             cands = cands.sort_values(rank_by, ascending=False)
             pick = cands.iloc[0]
             chosen_ins.append(pick.to_dict())
-            # remove pick from pool
             pool = pool[pool["id"] != pick["id"]]
             budget_remaining -= float(pick["now_cost"])
 
@@ -266,7 +247,7 @@ def suggest_transfers_greedy(
 # -----------------------
 st.set_page_config(page_title="FPL Analytics – Smarter Expected Points", layout="wide")
 st.title("⚽ FPL Analytics – Smarter Expected Points")
-st.caption("Data: Official Fantasy Premier League API. Model uses v2 (minutes + Poisson clean sheets + attacking proxy).")
+st.caption("Data: Official Fantasy Premier League API. Model uses v2 (xG/xA, cs prob, form & bonus blending).")
 
 # load data
 players_df, teams_df, element_types_df = load_fpl_data()
@@ -279,34 +260,40 @@ pm = build_player_master(players_df.copy(), teams_df.copy(), element_types_df.co
 st.sidebar.header("Model & display settings")
 horizon = st.sidebar.slider("Fixture horizon (matches)", 1, 10, 5)
 
+# New: live tuning sliders for form & bonus weights
+st.sidebar.markdown("**Blending weights (model vs recent signals)**")
+form_w = st.sidebar.slider("Form weight", min_value=0.0, max_value=1.0, value=0.25, step=0.01)
+bonus_w = st.sidebar.slider("Bonus weight", min_value=0.0, max_value=0.5, value=0.05, step=0.01)
+st.sidebar.caption("Blended xPts = model*(1 - form_w - bonus_w) + form_w*form + bonus_w*bonus_per_match")
+
+# Ranking & filters
 rank_by_choice = st.sidebar.selectbox("Rank by (per match or total)", ["xPts_per_match", "xPts_total"], index=1)
 min_minutes_for_leaderboards = st.sidebar.slider("Min historical minutes for leaderboards (0 = no filter)", 0, 2000, 270)
 top_n_per_position = st.sidebar.number_input("Top N per position", min_value=1, max_value=20, value=10, step=1)
 max_outs_allowed = st.sidebar.number_input("Max outs for multi-transfer suggestions", min_value=1, max_value=3, value=3, step=1)
 
-# run model (v2) - expects build_player_master & v2_expected_points in model.py
-pred = v2_expected_points(pm.copy(), fixtures_df.copy(), teams_df.copy(), horizon=horizon)
+# run model (v2) with live weights
+pred = v2_expected_points(pm.copy(), fixtures_df.copy(), teams_df.copy(), horizon=horizon, form_weight=form_w, bonus_weight=bonus_w)
 
-# Ensure games_proj exists and is clamped between 1 and horizon
+# Ensure games_proj exists and is clamped between 1 and horizon (model returns it but be safe)
 minutes_series = pd.to_numeric(pred.get("minutes", 0), errors="coerce").fillna(0)
 calc_games = (minutes_series / 90.0).replace([np.inf, -np.inf], 0.0).fillna(0.0)
-# clamp lower bound to 1 to avoid tiny denominators, and upper to horizon
 pred["games_proj"] = np.minimum(horizon, np.maximum(1.0, calc_games))
 
-# Ensure xPts_total exists (some model versions produce 'xPts' instead)
+# Ensure xPts_total exists (model should set blended totals)
 if "xPts_total" not in pred.columns and "xPts" in pred.columns:
     pred["xPts_total"] = pd.to_numeric(pred["xPts"], errors="coerce").fillna(0.0)
 elif "xPts_total" not in pred.columns:
-    # fallback zero
     pred["xPts_total"] = 0.0
 
-# xPts_per_match (safe: divide by clamped games_proj)
-pred["xPts_per_match"] = pred.apply(
-    lambda r: float(r["xPts_total"]) / float(r["games_proj"]) if (r.get("games_proj", 0) > 0) else float(r.get("xPts_total", 0.0)),
-    axis=1,
-)
+# xPts_per_match safe (model sets this to blended, but fallback if missing)
+if "xPts_per_match" not in pred.columns:
+    pred["xPts_per_match"] = pred.apply(
+        lambda r: float(r["xPts_total"]) / float(r["games_proj"]) if (r.get("games_proj", 0) > 0) else float(r.get("xPts_total", 0.0)),
+        axis=1,
+    )
 
-# value metric
+# add value column if available, otherwise compute locally
 if add_value_columns is not None:
     try:
         pred = add_value_columns(pred)
@@ -329,6 +316,9 @@ if "now_cost" in pred.columns:
 else:
     pred["£m"] = np.nan
 
+# Show current blending weights for clarity
+st.sidebar.markdown(f"**Current weights:** model ≈ {max(0.0, 1 - (form_w + bonus_w)):.2f}, form = {form_w:.2f}, bonus = {bonus_w:.2f}")
+
 # -----------------------
 # LEADERBOARDS
 # -----------------------
@@ -347,7 +337,7 @@ for pos, n in pos_map.items():
     elif pos == "DEF":
         display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "xAttack", "att_factor", "cs_prob", "xPts_per_match", "xPts_total"]
     else:  # GKP
-        display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "cs_prob", "xSaves", "xPts_per_match", "xPts_total"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "cs_prob", "xSaves_per_match" if "xSaves_per_match" in pred.columns else "xSaves_per_match", "xPts_per_match", "xPts_total"]
 
     st.dataframe(fmt_df_for_display(df_pos, display_cols).reset_index(drop=True))
 
@@ -367,7 +357,7 @@ for pos, n in pos_map.items():
     elif pos == "DEF":
         display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "xAttack", "att_factor", "cs_prob", "xPts_per_m", "xPts_per_match", "xPts_total"]
     else:
-        display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "cs_prob", "xSaves", "xPts_per_m", "xPts_per_match", "xPts_total"]
+        display_cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "cs_prob", "xSaves_per_match" if "xSaves_per_match" in pred.columns else "xSaves_per_match", "xPts_per_m", "xPts_per_match", "xPts_total"]
 
     st.dataframe(fmt_df_for_display(df_pos, display_cols).reset_index(drop=True))
 
@@ -377,7 +367,7 @@ for pos, n in pos_map.items():
 # -----------------------
 st.subheader("🧩 Analyze My 15-man Squad")
 
-# Build player options safely (use records to avoid weird f-string attribute errors)
+# Build player options safely
 player_options_map = {}
 for rec in pred.to_dict("records"):
     pid = int(rec.get("id"))
@@ -399,19 +389,15 @@ bank = st.number_input("Bank (money in the bank, £m)", min_value=0.0, step=0.1)
 
 if len(squad_ids) == 15:
     squad_df = pred[pred["id"].isin(squad_ids)].copy()
-
-    # Build best XI by trying formations (using the chosen ranking metric)
     best_xi = build_best_xi_from_squad(squad_df, rank_by=rank_by_choice)
     st.markdown(f"### ✅ Best XI (sorted by {rank_by_choice}):")
     st.dataframe(fmt_df_for_display(best_xi, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"]).reset_index(drop=True))
 
-    # captain / vice
     if not best_xi.empty and len(best_xi) >= 2:
         captain = best_xi.iloc[0]["web_name"]
         vice = best_xi.iloc[1]["web_name"]
         st.success(f"⭐ Recommended Captain: **{captain}** | Vice Captain: **{vice}**")
 
-    # Subs (bench)
     subs = squad_df[~squad_df["id"].isin(best_xi["id"])].sort_values(rank_by_choice, ascending=False)
     st.markdown(f"### 🪑 Subs (bench, sorted by {rank_by_choice}):")
     st.dataframe(fmt_df_for_display(subs, ["web_name", "pos", "team_name", "£m", "sel_by_%", "xPts_per_match", "xPts_total"]).reset_index(drop=True))
@@ -443,7 +429,6 @@ if len(squad_ids) == 15:
     else:
         st.info("No beneficial transfers found within your squad/minutes/budget (greedy search).")
 
-    # UI to choose up to 3 outs and get recommendations for exactly those outs
     st.markdown("#### 🎯 Choose up to 3 players to transfer OUT (we'll suggest replacements):")
     out_choices = st.multiselect(
         "Select players to sell (up to 3)",
@@ -453,10 +438,8 @@ if len(squad_ids) == 15:
     )
 
     if out_choices:
-        # compute freed budget
         freed = sum([float(pred.set_index("id").loc[o]["now_cost"]) for o in out_choices])
         budget_available = bank * 10 + freed
-
         base_ids = [pid for pid in squad_ids if pid not in out_choices]
 
         pool = pred[
@@ -479,7 +462,6 @@ if len(squad_ids) == 15:
                 break
             cands = pool[(pool["pos"] == pos) & (pool["now_cost"] <= budget_remaining)].sort_values(rank_by_choice, ascending=False)
             if cands.empty:
-                # try full budget if necessary
                 cands = pool[(pool["pos"] == pos) & (pool["now_cost"] <= budget_available)].sort_values(rank_by_choice, ascending=False)
             if cands.empty:
                 ok = False

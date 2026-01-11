@@ -32,7 +32,7 @@ def load_fixtures():
 
 
 # -----------------------
-# TEAM TABLES (CORRECT)
+# TEAM TABLES
 # -----------------------
 def build_team_table_from_fixtures(fixtures, teams, last_n=None):
     fx = fixtures[fixtures["finished"] == True].copy()
@@ -150,8 +150,11 @@ fixtures = load_fixtures()
 
 pm = build_player_master(players.copy(), teams.copy(), element_types.copy())
 
+# -----------------------
 # Sidebar
+# -----------------------
 st.sidebar.header("Model & display settings")
+
 horizon = st.sidebar.slider("Fixture horizon (matches)", 1, 10, 5)
 
 rank_by_choice = st.sidebar.selectbox("Rank by", ["xPts_total", "xPts_per_match"], index=0)
@@ -159,11 +162,27 @@ rank_by_choice = st.sidebar.selectbox("Rank by", ["xPts_total", "xPts_per_match"
 min_minutes_for_leaderboards = st.sidebar.slider("Min historical minutes filter", 0, 2000, 300)
 top_n_per_position = st.sidebar.number_input("Top N per position", 1, 20, 10)
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("Form & Momentum Controls")
+
+form_window = st.sidebar.slider("Recent form window (matches)", 3, 10, 5)
+form_weight = st.sidebar.slider("Form influence weight", 0.0, 1.0, 0.3, 0.05)
+bonus_weight = st.sidebar.slider("Bonus influence weight", 0.0, 0.5, 0.2, 0.05)
+
 # -----------------------
 # Run model
 # -----------------------
-pred = v2_expected_points(pm.copy(), fixtures.copy(), teams.copy(), horizon=horizon)
+pred = v2_expected_points(
+    pm.copy(),
+    fixtures.copy(),
+    teams.copy(),
+    horizon=horizon,
+    form_weight=form_weight,
+    bonus_weight=bonus_weight,
+    form_window=form_window,
+)
 
+# Safety: recompute total
 pred["xPts_total"] = pred["xPts_per_match"] * horizon
 
 if add_value_columns:
@@ -181,22 +200,21 @@ st.subheader("🏆 Season Team Strength (All Matches)")
 season_table = build_team_table_from_fixtures(fixtures, teams, last_n=None)
 st.dataframe(season_table.reset_index(drop=True))
 
-st.subheader("🔥 Recent Form")
+st.subheader("🔥 Recent Form (Team)")
 
-form_n = st.slider("Recent form window (matches)", 3, 10, 5)
+recent_n = st.slider("Recent team form window (matches)", 3, 10, 5)
 
-recent_form = build_team_table_from_fixtures(fixtures, teams, last_n=form_n)
+recent_form = build_team_table_from_fixtures(fixtures, teams, last_n=recent_n)
 st.dataframe(recent_form.reset_index(drop=True))
 
 st.subheader("🎯 FPL Production by Team (from player stats)")
-
 prod = build_team_fpl_production(players, teams)
 st.dataframe(prod.reset_index(drop=True))
 
 # -----------------------
 # PLAYER LEADERBOARDS
 # -----------------------
-st.header("🎯 Player Leaderboards")
+st.header("🎯 Player Leaderboards (Form-adjusted)")
 
 for pos in ["GKP", "DEF", "MID", "FWD"]:
     dfp = pred[pred["pos"] == pos].copy()
@@ -208,7 +226,12 @@ for pos in ["GKP", "DEF", "MID", "FWD"]:
 
     st.subheader(f"Top {len(dfp)} {pos}s by {rank_by_choice}")
 
-    cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "xPts_per_match", "xPts_total"]
+    cols = [
+        "web_name", "team_name", "pos", "£m", "selected_by_percent",
+        "xPts_per_match", "xPts_total", "form_factor", "bonus_factor", "minutes_factor"
+    ]
+    cols = [c for c in cols if c in dfp.columns]
+
     st.dataframe(dfp[cols].reset_index(drop=True))
 
-st.success("✅ Team tables, recent form & FPL production are now correctly computed.")
+st.success("✅ Form-adjusted xPts, team strength & momentum controls are live.")

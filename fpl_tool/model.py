@@ -1,7 +1,6 @@
 # model.py
 import pandas as pd
 import numpy as np
-from typing import Tuple
 
 
 # -----------------------------
@@ -9,13 +8,6 @@ from typing import Tuple
 # -----------------------------
 def sigmoid(x):
     return 1 / (1 + np.exp(-x))
-
-
-def zscore(series: pd.Series):
-    std = series.std()
-    if std == 0 or np.isnan(std):
-        return pd.Series(0, index=series.index)
-    return (series - series.mean()) / std
 
 
 # -----------------------------
@@ -50,14 +42,14 @@ def v2_expected_points(
     minutes_weight: float = 0.30,
 ):
     """
-    Proper expected points model with:
+    Expected points model using:
+    - xG / xA
     - Fixture difficulty
-    - xG/xA
     - Clean sheets
     - Saves
-    - Form adjustment (distribution scaled)
-    - Bonus adjustment (per 90, distribution scaled)
-    - Minutes reliability curve (sigmoid)
+    - FPL Form (DIRECT from API)
+    - Bonus per 90
+    - Minutes reliability curve
     """
 
     df = players.copy()
@@ -159,30 +151,31 @@ def v2_expected_points(
 
     df["xPts_base"] = base
 
-    # ==========================================================
-    # 🔥 SMART ADJUSTMENT FACTORS
-    # ==========================================================
+    # ==================================================
+    # SMART ADJUSTMENTS
+    # ==================================================
 
     # -----------------------------
     # Minutes factor (sigmoid reliability curve)
     # -----------------------------
-    # 0 mins -> ~0.3
-    # 900 mins -> ~0.7
-    # 2000+ mins -> ~1.0
     df["minutes_factor"] = 0.3 + 0.7 * sigmoid((df["minutes"] - 900) / 400)
 
     # -----------------------------
-    # Form factor (z-score + tanh)
+    # ✅ FORM FACTOR (DIRECT FROM FPL API)
     # -----------------------------
-    form_z = zscore(df["form"])
-    df["form_factor"] = 1 + form_weight * np.tanh(form_z)
+    league_avg_form = df["form"].mean() if df["form"].mean() > 0 else 1.0
+
+    df["form_factor"] = 1 + form_weight * ((df["form"] - league_avg_form) / league_avg_form)
+    df["form_factor"] = df["form_factor"].clip(0.7, 1.3)
 
     # -----------------------------
-    # Bonus factor (per 90, z-score)
+    # Bonus factor (per 90)
     # -----------------------------
     bonus_per_90 = np.where(df["minutes"] > 0, df["bonus"] / df["minutes"] * 90, 0)
-    bonus_z = zscore(pd.Series(bonus_per_90))
-    df["bonus_factor"] = 1 + bonus_weight * np.tanh(bonus_z)
+    league_avg_bonus = np.mean(bonus_per_90) if np.mean(bonus_per_90) > 0 else 0.01
+
+    df["bonus_factor"] = 1 + bonus_weight * ((bonus_per_90 - league_avg_bonus) / league_avg_bonus)
+    df["bonus_factor"] = df["bonus_factor"].clip(0.8, 1.2)
 
     # -----------------------------
     # Final xPts per match
@@ -200,7 +193,7 @@ def v2_expected_points(
     df["xPts_total"] = df["xPts_per_match"] * float(horizon)
 
     # -----------------------------
-    # Helpful columns
+    # Price
     # -----------------------------
     df["price_m"] = df["now_cost"] / 10
 
@@ -213,8 +206,7 @@ def v2_expected_points(
         "xPts_per_match", "xPts_total"
     ]
 
-    existing = [c for c in keep if c in df.columns]
-    return df[existing].copy()
+    return df[[c for c in keep if c in df.columns]].copy()
 
 
 # -----------------------------

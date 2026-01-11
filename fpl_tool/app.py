@@ -179,7 +179,6 @@ pred = v2_expected_points(
     horizon=horizon,
     form_weight=form_weight,
     bonus_weight=bonus_weight,
-    form_window=form_window,
 )
 
 # Safety: recompute total

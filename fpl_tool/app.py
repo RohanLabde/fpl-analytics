@@ -1,13 +1,9 @@
 # app.py
-import itertools
-from typing import List, Tuple
-
 import pandas as pd
 import numpy as np
 import requests
 import streamlit as st
 
-# Import model functions
 from fpl_tool.model import build_player_master, v2_expected_points
 
 try:
@@ -17,7 +13,7 @@ except Exception:
 
 
 # -----------------------
-# Data loaders (cached)
+# Data loaders
 # -----------------------
 @st.cache_data(ttl=3600)
 def load_fpl_data():
@@ -36,79 +32,111 @@ def load_fixtures():
 
 
 # -----------------------
-# Team Tables (FIXED)
+# TEAM TABLES (CORRECT)
 # -----------------------
-def build_team_season_table(fixtures: pd.DataFrame, teams: pd.DataFrame):
+def build_team_table_from_fixtures(fixtures, teams, last_n=None):
     fx = fixtures[fixtures["finished"] == True].copy()
+
     rows = []
 
     for _, t in teams.iterrows():
         tid = t["id"]
         name = t["name"]
 
-        home = fx[fx["team_h"] == tid]
-        away = fx[fx["team_a"] == tid]
+        team_fx = fx[(fx["team_h"] == tid) | (fx["team_a"] == tid)].copy()
 
-        played = len(home) + len(away)
+        if "kickoff_time" in team_fx.columns:
+            team_fx = team_fx.sort_values("kickoff_time")
+
+        if last_n is not None:
+            team_fx = team_fx.tail(last_n)
+
+        played = len(team_fx)
 
         if played == 0:
             rows.append({
-                "id": tid, "name": name,
-                "played": 0, "points": 0, "win": 0, "draw": 0, "loss": 0,
+                "team": name, "played": 0, "points": 0, "win": 0, "draw": 0, "loss": 0,
                 "GF": 0, "GA": 0, "CS": 0,
                 "GF_per_match": 0.0, "GA_per_match": 0.0, "CS_%": 0.0
             })
             continue
 
-        GF = home["team_h_score"].sum() + away["team_a_score"].sum()
-        GA = home["team_a_score"].sum() + away["team_h_score"].sum()
-        CS = (home["team_a_score"] == 0).sum() + (away["team_h_score"] == 0).sum()
+        GF = 0
+        GA = 0
+        CS = 0
+        win = 0
+        draw = 0
+        loss = 0
 
-        win = (home["team_h_score"] > home["team_a_score"]).sum() + \
-              (away["team_a_score"] > away["team_h_score"]).sum()
+        for _, m in team_fx.iterrows():
+            if m["team_h"] == tid:
+                gf = m["team_h_score"]
+                ga = m["team_a_score"]
+            else:
+                gf = m["team_a_score"]
+                ga = m["team_h_score"]
 
-        draw = (home["team_h_score"] == home["team_a_score"]).sum() + \
-               (away["team_a_score"] == away["team_h_score"]).sum()
+            GF += gf
+            GA += ga
 
-        loss = played - win - draw
+            if ga == 0:
+                CS += 1
+            if gf > ga:
+                win += 1
+            elif gf == ga:
+                draw += 1
+            else:
+                loss += 1
+
         points = win * 3 + draw
 
         rows.append({
-            "id": tid,
-            "name": name,
+            "team": name,
             "played": played,
             "points": points,
             "win": win,
             "draw": draw,
             "loss": loss,
-            "GF": int(GF),
-            "GA": int(GA),
-            "CS": int(CS),
+            "GF": GF,
+            "GA": GA,
+            "CS": CS,
             "GF_per_match": round(GF / played, 2),
             "GA_per_match": round(GA / played, 2),
             "CS_%": round(100 * CS / played, 1),
         })
 
-    return pd.DataFrame(rows).sort_values("points", ascending=False)
+    df = pd.DataFrame(rows).sort_values("points", ascending=False)
+    return df
 
 
-def build_team_fpl_production(players: pd.DataFrame):
+def build_team_fpl_production(players, teams):
     df = players.copy()
 
-    numeric_cols = ["goals_scored", "assists", "clean_sheets", "bonus", "expected_goals"]
+    numeric_cols = ["goals_scored", "assists", "bonus", "expected_goals"]
     for c in numeric_cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
 
     agg = df.groupby("team").agg({
         "goals_scored": "sum",
         "assists": "sum",
-        "clean_sheets": "sum",
         "bonus": "sum",
         "expected_goals": "sum",
     }).reset_index()
 
-    return agg
+    team_map = teams.set_index("id")["name"].to_dict()
+    agg["team"] = agg["team"].map(team_map)
+
+    agg = agg.rename(columns={
+        "team": "team_name",
+        "goals_scored": "Goals",
+        "assists": "Assists",
+        "bonus": "Bonus",
+        "expected_goals": "xG",
+    })
+
+    agg["xG"] = agg["xG"].round(2)
+
+    return agg.sort_values("Goals", ascending=False)
 
 
 # -----------------------
@@ -116,7 +144,6 @@ def build_team_fpl_production(players: pd.DataFrame):
 # -----------------------
 st.set_page_config(page_title="FPL Analytics – Smarter Expected Points", layout="wide")
 st.title("⚽ FPL Analytics – Smarter Expected Points")
-st.caption("Data: Official Fantasy Premier League API. Model uses v2 logic.")
 
 players, teams, element_types = load_fpl_data()
 fixtures = load_fixtures()
@@ -137,52 +164,37 @@ top_n_per_position = st.sidebar.number_input("Top N per position", 1, 20, 10)
 # -----------------------
 pred = v2_expected_points(pm.copy(), fixtures.copy(), teams.copy(), horizon=horizon)
 
-# Clamp games_proj = 1 ALWAYS
-pred["games_proj"] = 1
+pred["xPts_total"] = pred["xPts_per_match"] * horizon
 
-# Ensure totals exist
-if "xPts_total" not in pred.columns:
-    pred["xPts_total"] = pred["xPts_per_match"] * horizon
-
-# Value columns
 if add_value_columns:
     pred = add_value_columns(pred)
-else:
-    pred["xPts_per_m"] = pred["xPts_per_match"] / (pred["now_cost"] / 10)
 
 pred["£m"] = pred["now_cost"] / 10
 pred["selected_by_percent"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0)
 
 # -----------------------
-# TEAM DASHBOARD (FIXED)
+# TEAM DASHBOARD
 # -----------------------
 st.header("📊 Team Strength & Form Dashboard")
 
-st.subheader("🍱 Season Team Strength")
-team_season = build_team_season_table(fixtures, teams)
-st.dataframe(team_season.reset_index(drop=True))
+st.subheader("🏆 Season Team Strength (All Matches)")
+season_table = build_team_table_from_fixtures(fixtures, teams, last_n=None)
+st.dataframe(season_table.reset_index(drop=True))
 
-st.subheader("🎯 FPL Production by Team")
-team_prod = build_team_fpl_production(players)
+st.subheader("🔥 Recent Form")
 
-team_map = teams.set_index("id")["name"].to_dict()
-team_prod["team_name"] = team_prod["team"].map(team_map)
+form_n = st.slider("Recent form window (matches)", 3, 10, 5)
 
-team_prod = team_prod.rename(columns={
-    "goals_scored": "Goals",
-    "assists": "Assists",
-    "clean_sheets": "CleanSheets",
-    "bonus": "Bonus",
-    "expected_goals": "xG",
-})
+recent_form = build_team_table_from_fixtures(fixtures, teams, last_n=form_n)
+st.dataframe(recent_form.reset_index(drop=True))
 
-team_prod["xG"] = team_prod["xG"].round(2)
-team_prod = team_prod.sort_values("Goals", ascending=False)
+st.subheader("🎯 FPL Production by Team (from player stats)")
 
-st.dataframe(team_prod[["team_name", "Goals", "Assists", "CleanSheets", "Bonus", "xG"]].reset_index(drop=True))
+prod = build_team_fpl_production(players, teams)
+st.dataframe(prod.reset_index(drop=True))
 
 # -----------------------
-# LEADERBOARDS
+# PLAYER LEADERBOARDS
 # -----------------------
 st.header("🎯 Player Leaderboards")
 
@@ -199,7 +211,4 @@ for pos in ["GKP", "DEF", "MID", "FWD"]:
     cols = ["web_name", "team_name", "pos", "£m", "selected_by_percent", "xPts_per_match", "xPts_total"]
     st.dataframe(dfp[cols].reset_index(drop=True))
 
-# -----------------------
-# DONE
-# -----------------------
-st.success("✅ Team tables, xPts model, filters and rankings are now consistent and fixed.")
+st.success("✅ Team tables, recent form & FPL production are now correctly computed.")

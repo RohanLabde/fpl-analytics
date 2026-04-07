@@ -26,7 +26,7 @@ def load_fixtures():
 
 
 # -----------------------
-# MODEL CACHE (NEW)
+# MODEL CACHE
 # -----------------------
 @st.cache_data(ttl=3600)
 def run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight):
@@ -149,10 +149,78 @@ def build_team_fpl_production(players, teams):
 
 
 # -----------------------
+# DECISION ENGINE
+# -----------------------
+def get_captain_picks(df):
+    return df.sort_values("xPts_per_match", ascending=False).head(5)
+
+
+def get_differentials(df, max_ownership=10):
+    return df[
+        (df["selected_by_percent"] < max_ownership) &
+        (df["xPts_per_match"] > df["xPts_per_match"].quantile(0.75))
+    ].sort_values("xPts_per_match", ascending=False).head(5)
+
+
+def get_safe_picks(df):
+    return df[
+        (df["selected_by_percent"] > 20)
+    ].sort_values("xPts_per_match", ascending=False).head(5)
+
+
+def get_avoid_players(df):
+    return df[
+        (df["selected_by_percent"] > 15) &
+        (df["xPts_per_match"] < df["xPts_per_match"].quantile(0.4))
+    ].sort_values("selected_by_percent", ascending=False).head(5)
+
+
+def get_fixture_swing_teams(fixtures, teams, horizon=5):
+    future_fx = fixtures[fixtures["finished"] == False].copy()
+
+    swing_scores = []
+
+    for _, t in teams.iterrows():
+        tid = t["id"]
+        name = t["name"]
+
+        team_fx = future_fx[
+            (future_fx["team_h"] == tid) | (future_fx["team_a"] == tid)
+        ].head(horizon)
+
+        if len(team_fx) == 0:
+            continue
+
+        difficulty = []
+
+        for _, fx in team_fx.iterrows():
+            if fx["team_h"] == tid:
+                diff = fx.get("team_h_difficulty", 3)
+            else:
+                diff = fx.get("team_a_difficulty", 3)
+
+            difficulty.append(diff)
+
+        avg_diff = np.mean(difficulty)
+
+        swing_scores.append({
+            "team": name,
+            "fixture_difficulty": round(avg_diff, 2)
+        })
+
+    df = pd.DataFrame(swing_scores)
+
+    good = df.sort_values("fixture_difficulty").head(5)
+    bad = df.sort_values("fixture_difficulty", ascending=False).head(5)
+
+    return good, bad
+
+
+# -----------------------
 # UI
 # -----------------------
 st.set_page_config(page_title="FPL Analytics – Smarter Expected Points", layout="wide")
-st.title("⚽ FPL Analytics – Smarter Expected Points (v3 Engine)")
+st.title("⚽ FPL Analytics – Smarter Expected Points (v3 + Decision Engine)")
 
 players, teams, element_types = load_fpl_data()
 fixtures = load_fixtures()
@@ -190,7 +258,7 @@ pred = add_value_columns(pred)
 
 
 # -----------------------
-# DEBUG SECTION (IMPORTANT)
+# Debug
 # -----------------------
 with st.expander("🔍 Debug: Raw Model Output"):
     st.dataframe(pred.head(50))
@@ -241,4 +309,45 @@ for pos in ["GKP", "DEF", "MID", "FWD"]:
     st.dataframe(dfp[cols].reset_index(drop=True))
 
 
-st.success("✅ v3 Model Active: Fixture-aware, opponent-aware, smarter predictions.")
+# -----------------------
+# DECISION ENGINE UI
+# -----------------------
+st.header("🧠 FPL Decision Engine")
+
+# Captain Picks
+st.subheader("👑 Best Captain Picks")
+captains = get_captain_picks(pred)
+st.dataframe(captains[["web_name", "team_name", "xPts_per_match"]])
+
+# Differentials
+st.subheader("💎 Hidden Gems (Differentials)")
+diffs = get_differentials(pred)
+st.dataframe(diffs[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+
+# Safe Picks
+st.subheader("🛡️ Safe Picks (Template Players)")
+safe = get_safe_picks(pred)
+st.dataframe(safe[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+
+# Avoid Players
+st.subheader("🚨 Avoid These Players")
+avoid = get_avoid_players(pred)
+st.dataframe(avoid[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+
+# Fixture Swings
+st.subheader("📅 Fixture Swings")
+
+good_teams, bad_teams = get_fixture_swing_teams(fixtures, teams, horizon)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    st.markdown("### ✅ Good Fixture Runs")
+    st.dataframe(good_teams)
+
+with col2:
+    st.markdown("### ❌ Tough Fixture Runs")
+    st.dataframe(bad_teams)
+
+
+st.success("✅ v3 Model + Decision Engine Active. You now have a competitive edge.")

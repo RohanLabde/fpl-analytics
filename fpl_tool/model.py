@@ -3,9 +3,9 @@ import numpy as np
 
 
 # ----------------------------
-# Build master player table
+# Build player master
 # ----------------------------
-def build_player_master(players: pd.DataFrame, teams: pd.DataFrame, element_types: pd.DataFrame) -> pd.DataFrame:
+def build_player_master(players, teams, element_types):
     df = players.copy()
 
     team_map = teams.set_index("id")["name"].to_dict()
@@ -14,15 +14,14 @@ def build_player_master(players: pd.DataFrame, teams: pd.DataFrame, element_type
     pos_map = element_types.set_index("id")["singular_name_short"].to_dict()
     df["pos"] = df["element_type"].map(pos_map)
 
-    df["id"] = df["id"].astype(int)
     return df
 
 
 # ----------------------------
-# TEAM STRENGTH MODEL
+# Team strength (same as v3)
 # ----------------------------
-def build_team_strength(fixtures: pd.DataFrame, teams: pd.DataFrame):
-    fx = fixtures[fixtures["finished"] == True].copy()
+def build_team_strength(fixtures, teams):
+    fx = fixtures[fixtures["finished"] == True]
 
     rows = []
 
@@ -35,34 +34,26 @@ def build_team_strength(fixtures: pd.DataFrame, teams: pd.DataFrame):
             rows.append({"team": tid, "att": 1.0, "def": 1.0})
             continue
 
-        GF = 0
-        GA = 0
+        GF = GA = 0
 
         for _, m in team_fx.iterrows():
             if m["team_h"] == tid:
-                gf = m["team_h_score"]
-                ga = m["team_a_score"]
+                GF += m["team_h_score"]
+                GA += m["team_a_score"]
             else:
-                gf = m["team_a_score"]
-                ga = m["team_h_score"]
-
-            GF += gf
-            GA += ga
+                GF += m["team_a_score"]
+                GA += m["team_h_score"]
 
         matches = len(team_fx)
 
-        att = GF / matches
-        deff = GA / matches
-
         rows.append({
             "team": tid,
-            "attack_strength": att,
-            "defense_weakness": deff
+            "attack_strength": GF / matches,
+            "defense_weakness": GA / matches
         })
 
     df = pd.DataFrame(rows)
 
-    # Normalize around league average
     df["attack_strength"] /= df["attack_strength"].mean()
     df["defense_weakness"] /= df["defense_weakness"].mean()
 
@@ -70,170 +61,146 @@ def build_team_strength(fixtures: pd.DataFrame, teams: pd.DataFrame):
 
 
 # ----------------------------
-# MAIN MODEL (v3)
+# Minutes Model (NEW)
 # ----------------------------
-def v3_expected_points(
-    players: pd.DataFrame,
-    fixtures: pd.DataFrame,
-    teams: pd.DataFrame,
-    horizon: int = 5,
-    form_weight: float = 0.25,
-    bonus_weight: float = 0.15,
-    minutes_weight: float = 0.25,
+def estimate_minutes(row):
+    mins = row["minutes"]
+
+    if mins > 2000:
+        return 85
+    elif mins > 1200:
+        return 75
+    elif mins > 800:
+        return 65
+    elif mins > 400:
+        return 50
+    elif mins > 200:
+        return 35
+    else:
+        return 20
+
+
+# ----------------------------
+# MAIN MODEL v4
+# ----------------------------
+def v4_expected_points(
+    players,
+    fixtures,
+    teams,
+    horizon=5,
+    form_weight=0.25,
+    bonus_weight=0.15,
 ):
+
     df = players.copy()
 
-    # ----------------------------
-    # Ensure numeric columns
-    # ----------------------------
-    num_cols = [
+    # Ensure numeric
+    cols = [
         "expected_goals_per_90",
         "expected_assists_per_90",
         "saves_per_90",
         "minutes",
-        "now_cost",
-        "selected_by_percent",
         "form",
         "bonus",
+        "selected_by_percent",
+        "now_cost"
     ]
-    for c in num_cols:
-        if c not in df.columns:
-            df[c] = 0
-        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
-    # Base attacking ability
+    for c in cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+
     df["xAttack_per90"] = df["expected_goals_per_90"] + df["expected_assists_per_90"]
 
     # ----------------------------
-    # Build team strength
+    # Team strength
     # ----------------------------
     team_strength = build_team_strength(fixtures, teams)
 
     # ----------------------------
-    # Fixture-by-fixture simulation
+    # Expected minutes
     # ----------------------------
-    total_xpts = []
+    df["exp_minutes"] = df.apply(estimate_minutes, axis=1)
+    df["mins_factor"] = df["exp_minutes"] / 90
+
+    # ----------------------------
+    # Fixture simulation
+    # ----------------------------
+    total_pts = []
 
     for _, p in df.iterrows():
         tid = p["team"]
 
-        team_fx = fixtures[(fixtures["team_h"] == tid) | (fixtures["team_a"] == tid)].copy()
-
-        if "kickoff_time" in team_fx.columns:
-            team_fx = team_fx.sort_values("kickoff_time")
-
-        team_fx = team_fx.head(horizon)
+        team_fx = fixtures[
+            (fixtures["team_h"] == tid) | (fixtures["team_a"] == tid)
+        ].sort_values("kickoff_time").head(horizon)
 
         player_total = 0
 
         for _, fx in team_fx.iterrows():
 
-            # Identify opponent + home/away
             if fx["team_h"] == tid:
-                opponent = fx["team_a"]
+                opp = fx["team_a"]
                 home = True
             else:
-                opponent = fx["team_h"]
+                opp = fx["team_h"]
                 home = False
 
-            opp = team_strength.get(opponent, {"attack_strength": 1.0, "defense_weakness": 1.0})
+            opp_data = team_strength.get(opp, {"attack_strength": 1, "defense_weakness": 1})
 
-            opp_def = opp["defense_weakness"]
-            opp_att = opp["attack_strength"]
+            opp_def = opp_data["defense_weakness"]
+            opp_att = opp_data["attack_strength"]
 
-            # Home/Away adjustment
             home_factor = 1.1 if home else 0.9
 
-            # Attack scaling
             attack_factor = opp_def * home_factor
 
-            # Clean sheet probability (inverse of opponent attack)
             cs_prob = np.exp(-opp_att)
 
-            # Saves (GK only)
-            saves = p["saves_per_90"] * 0.33
+            # KEY CHANGE: scale by expected minutes
+            attack_pts = p["xAttack_per90"] * p["mins_factor"] * attack_factor
 
-            appearance = 2.0
+            appearance = 2 * p["mins_factor"]
 
-            # Position scoring
             if p["pos"] in ["MID", "FWD"]:
-                xp = (p["xAttack_per90"] * attack_factor) + appearance
+                xp = attack_pts + appearance
 
             elif p["pos"] == "DEF":
-                xp = (p["xAttack_per90"] * attack_factor) + (cs_prob * 4) + appearance
+                xp = attack_pts + (cs_prob * 4 * p["mins_factor"]) + appearance
 
             elif p["pos"] in ["GKP", "GK"]:
-                xp = (cs_prob * 4) + saves + appearance
+                saves = p["saves_per_90"] * p["mins_factor"]
+                xp = (cs_prob * 4 * p["mins_factor"]) + saves + appearance
 
             else:
-                xp = (p["xAttack_per90"] * attack_factor) + appearance
+                xp = attack_pts + appearance
 
             player_total += xp
 
-        total_xpts.append(player_total)
+        total_pts.append(player_total)
 
-    df["xPts_total"] = total_xpts
+    df["xPts_total"] = total_pts
     df["xPts_per_match"] = df["xPts_total"] / horizon
 
-    # ============================================================
-    # SMART ADJUSTMENTS (same as before)
-    # ============================================================
-
-    # FORM
-    df["form"] = df["form"].clip(lower=0)
-    league_avg_form = df["form"].replace(0, np.nan).mean()
-
-    form_delta = (df["form"] - league_avg_form) / league_avg_form
-    df["form_factor"] = 1 + form_weight * np.tanh(form_delta)
+    # ----------------------------
+    # Form adjustment
+    # ----------------------------
+    avg_form = df["form"].replace(0, np.nan).mean()
+    df["form_factor"] = 1 + form_weight * np.tanh((df["form"] - avg_form) / avg_form)
     df["form_factor"] = df["form_factor"].clip(0.85, 1.15)
 
-    # BONUS
-    bonus_per_90 = df["bonus"] / (df["minutes"] / 90).replace(0, np.nan)
-    bonus_per_90 = bonus_per_90.fillna(0)
+    # Bonus
+    bonus_per90 = df["bonus"] / (df["minutes"] / 90).replace(0, np.nan)
+    avg_bonus = bonus_per90.replace(0, np.nan).mean()
 
-    league_avg_bonus = bonus_per_90.replace(0, np.nan).mean()
-
-    bonus_delta = (bonus_per_90 - league_avg_bonus) / league_avg_bonus
-    df["bonus_factor"] = 1 + bonus_weight * np.tanh(bonus_delta)
+    df["bonus_factor"] = 1 + bonus_weight * np.tanh((bonus_per90 - avg_bonus) / avg_bonus)
     df["bonus_factor"] = df["bonus_factor"].clip(0.9, 1.1)
 
-    # MINUTES
-    df["minutes_factor"] = 0.5 + 0.5 * np.tanh((df["minutes"] - 900) / 900)
-    df["minutes_factor"] = 1 + minutes_weight * (df["minutes_factor"] - 1)
-    df["minutes_factor"] = df["minutes_factor"].clip(0.7, 1.05)
-
     # Apply adjustments
-    df["xPts_per_match"] *= df["form_factor"] * df["bonus_factor"] * df["minutes_factor"]
-    df["xPts_total"] *= df["form_factor"] * df["bonus_factor"] * df["minutes_factor"]
+    df["xPts_total"] *= df["form_factor"] * df["bonus_factor"]
+    df["xPts_per_match"] *= df["form_factor"] * df["bonus_factor"]
 
-    # ----------------------------
-    # Value metrics
-    # ----------------------------
+    # Value
     df["price_m"] = df["now_cost"] / 10
     df["xPts_per_m"] = df["xPts_per_match"] / df["price_m"].replace(0, np.nan)
-    df["xPts_per_m"] = df["xPts_per_m"].replace([np.inf, -np.inf], np.nan).fillna(0)
 
-    # ----------------------------
-    # Final output
-    # ----------------------------
-    keep = [
-        "id", "web_name", "team_name", "pos",
-        "price_m", "minutes", "selected_by_percent",
-        "form_factor", "bonus_factor", "minutes_factor",
-        "xPts_per_match", "xPts_total", "xPts_per_m"
-    ]
-
-    return df[keep].copy()
-
-
-# ----------------------------
-# Value helper
-# ----------------------------
-def add_value_columns(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    price = out["price_m"].replace(0, np.nan)
-
-    out["xPts_total_per_m"] = out["xPts_total"] / price
-    out["xPts_total_per_m"] = out["xPts_total_per_m"].replace([np.inf, -np.inf], np.nan).fillna(0)
-
-    return out
+    return df

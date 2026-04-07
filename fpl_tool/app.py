@@ -149,13 +149,15 @@ def build_team_fpl_production(players, teams):
 
 
 # -----------------------
-# DECISION ENGINE
+# DECISION ENGINE (UPDATED)
 # -----------------------
 def get_captain_picks(df):
+    df = df[df["pos"].isin(["MID", "FWD"])]
     return df.sort_values("xPts_per_match", ascending=False).head(5)
 
 
 def get_differentials(df, max_ownership=10):
+    df = df[df["pos"] != "GKP"]
     return df[
         (df["selected_by_percent"] < max_ownership) &
         (df["xPts_per_match"] > df["xPts_per_match"].quantile(0.75))
@@ -169,10 +171,15 @@ def get_safe_picks(df):
 
 
 def get_avoid_players(df):
+    df = df[df["pos"] != "GKP"]
     return df[
         (df["selected_by_percent"] > 15) &
         (df["xPts_per_match"] < df["xPts_per_match"].quantile(0.4))
     ].sort_values("selected_by_percent", ascending=False).head(5)
+
+
+def get_best_goalkeepers(df):
+    return df[df["pos"] == "GKP"].sort_values("xPts_per_match", ascending=False).head(5)
 
 
 def get_fixture_swing_teams(fixtures, teams, horizon=5):
@@ -228,9 +235,7 @@ fixtures = load_fixtures()
 pm = build_player_master(players.copy(), teams.copy(), element_types.copy())
 
 
-# -----------------------
 # Sidebar
-# -----------------------
 st.sidebar.header("Model Settings")
 
 horizon = st.sidebar.slider("Fixture horizon (matches)", 1, 10, 5)
@@ -246,9 +251,7 @@ form_weight = st.sidebar.slider("Form weight", 0.0, 1.0, 0.3, 0.05)
 bonus_weight = st.sidebar.slider("Bonus weight", 0.0, 0.5, 0.2, 0.05)
 
 
-# -----------------------
-# Run Model
-# -----------------------
+# Run model
 pred = run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight)
 
 pred["£m"] = pred["price_m"]
@@ -258,83 +261,25 @@ pred = add_value_columns(pred)
 
 
 # -----------------------
-# Debug
-# -----------------------
-with st.expander("🔍 Debug: Raw Model Output"):
-    st.dataframe(pred.head(50))
-
-
-# -----------------------
-# TEAM DASHBOARD
-# -----------------------
-st.header("📊 Team Strength & Form")
-
-st.subheader("🏆 Season Strength")
-season_table = build_team_table_from_fixtures(fixtures, teams)
-st.dataframe(season_table.reset_index(drop=True))
-
-st.subheader("🔥 Recent Form")
-recent_n = st.slider("Recent matches window", 3, 10, 5)
-recent_form = build_team_table_from_fixtures(fixtures, teams, last_n=recent_n)
-st.dataframe(recent_form.reset_index(drop=True))
-
-st.subheader("🎯 FPL Production")
-prod = build_team_fpl_production(players, teams)
-st.dataframe(prod.reset_index(drop=True))
-
-
-# -----------------------
-# PLAYER LEADERBOARDS
-# -----------------------
-st.header("🎯 Player Leaderboards (v3 Model)")
-
-for pos in ["GKP", "DEF", "MID", "FWD"]:
-    dfp = pred[pred["pos"] == pos].copy()
-
-    if min_minutes_for_leaderboards > 0:
-        dfp = dfp[dfp["minutes"] >= min_minutes_for_leaderboards]
-
-    dfp = dfp.sort_values(rank_by_choice, ascending=False).head(top_n_per_position)
-
-    st.subheader(f"Top {len(dfp)} {pos}s")
-
-    cols = [
-        "web_name", "team_name", "pos", "£m",
-        "selected_by_percent", "xPts_per_match", "xPts_total",
-        "xPts_per_m", "xPts_total_per_m"
-    ]
-
-    cols = [c for c in cols if c in dfp.columns]
-
-    st.dataframe(dfp[cols].reset_index(drop=True))
-
-
-# -----------------------
 # DECISION ENGINE UI
 # -----------------------
 st.header("🧠 FPL Decision Engine")
 
-# Captain Picks
-st.subheader("👑 Best Captain Picks")
-captains = get_captain_picks(pred)
-st.dataframe(captains[["web_name", "team_name", "xPts_per_match"]])
+st.subheader("👑 Best Captain Picks (MID/FWD)")
+st.dataframe(get_captain_picks(pred)[["web_name", "team_name", "xPts_per_match"]])
 
-# Differentials
 st.subheader("💎 Hidden Gems (Differentials)")
-diffs = get_differentials(pred)
-st.dataframe(diffs[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+st.dataframe(get_differentials(pred)[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
 
-# Safe Picks
-st.subheader("🛡️ Safe Picks (Template Players)")
-safe = get_safe_picks(pred)
-st.dataframe(safe[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+st.subheader("🛡️ Safe Picks")
+st.dataframe(get_safe_picks(pred)[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
 
-# Avoid Players
 st.subheader("🚨 Avoid These Players")
-avoid = get_avoid_players(pred)
-st.dataframe(avoid[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
+st.dataframe(get_avoid_players(pred)[["web_name", "team_name", "selected_by_percent", "xPts_per_match"]])
 
-# Fixture Swings
+st.subheader("🧤 Best Goalkeepers")
+st.dataframe(get_best_goalkeepers(pred)[["web_name", "team_name", "xPts_per_match"]])
+
 st.subheader("📅 Fixture Swings")
 
 good_teams, bad_teams = get_fixture_swing_teams(fixtures, teams, horizon)
@@ -350,4 +295,4 @@ with col2:
     st.dataframe(bad_teams)
 
 
-st.success("✅ v3 Model + Decision Engine Active. You now have a competitive edge.")
+st.success("✅ Decision Engine Optimized: Position-aware intelligence enabled.")

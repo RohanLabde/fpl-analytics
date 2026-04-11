@@ -18,7 +18,7 @@ def build_player_master(players, teams, element_types):
 
 
 # ----------------------------
-# Team strength (same as v3)
+# Team strength
 # ----------------------------
 def build_team_strength(fixtures, teams):
     fx = fixtures[fixtures["finished"] == True]
@@ -31,7 +31,7 @@ def build_team_strength(fixtures, teams):
         team_fx = fx[(fx["team_h"] == tid) | (fx["team_a"] == tid)]
 
         if len(team_fx) == 0:
-            rows.append({"team": tid, "att": 1.0, "def": 1.0})
+            rows.append({"team": tid, "attack_strength": 1.0, "defense_weakness": 1.0})
             continue
 
         GF = GA = 0
@@ -61,7 +61,7 @@ def build_team_strength(fixtures, teams):
 
 
 # ----------------------------
-# Minutes Model (NEW)
+# Minutes model
 # ----------------------------
 def estimate_minutes(row):
     mins = row["minutes"]
@@ -81,9 +81,9 @@ def estimate_minutes(row):
 
 
 # ----------------------------
-# MAIN MODEL v4
+# MAIN MODEL v5
 # ----------------------------
-def v4_expected_points(
+def v5_expected_points(
     players,
     fixtures,
     teams,
@@ -111,91 +111,101 @@ def v4_expected_points(
 
     df["xAttack_per90"] = df["expected_goals_per_90"] + df["expected_assists_per_90"]
 
-    # ----------------------------
     # Team strength
-    # ----------------------------
     team_strength = build_team_strength(fixtures, teams)
 
-    # ----------------------------
     # Expected minutes
-    # ----------------------------
     df["exp_minutes"] = df.apply(estimate_minutes, axis=1)
     df["mins_factor"] = df["exp_minutes"] / 90
 
-    # ----------------------------
-    # Fixture simulation
-    # ----------------------------
     total_pts = []
+    fixtures_count = []
 
     for _, p in df.iterrows():
         tid = p["team"]
 
+        # FUTURE FIXTURES ONLY
         team_fx = fixtures[
-            (fixtures["team_h"] == tid) | (fixtures["team_a"] == tid)
-        ].sort_values("kickoff_time").head(horizon)
+            ((fixtures["team_h"] == tid) | (fixtures["team_a"] == tid)) &
+            (fixtures["finished"] == False)
+        ].copy()
+
+        if "kickoff_time" in team_fx.columns:
+            team_fx = team_fx.sort_values("kickoff_time")
+
+        # GROUP BY GAMEWEEK
+        gw_groups = team_fx.groupby("event")
+
+        next_gws = sorted(gw_groups.groups.keys())[:horizon]
 
         player_total = 0
+        total_matches = 0
 
-        for _, fx in team_fx.iterrows():
+        for gw in next_gws:
+            gw_matches = gw_groups.get_group(gw)
+            gw_points = 0
 
-            if fx["team_h"] == tid:
-                opp = fx["team_a"]
-                home = True
-            else:
-                opp = fx["team_h"]
-                home = False
+            total_matches += len(gw_matches)
 
-            opp_data = team_strength.get(opp, {"attack_strength": 1, "defense_weakness": 1})
+            for _, fx in gw_matches.iterrows():
 
-            opp_def = opp_data["defense_weakness"]
-            opp_att = opp_data["attack_strength"]
+                if fx["team_h"] == tid:
+                    opp = fx["team_a"]
+                    home = True
+                else:
+                    opp = fx["team_h"]
+                    home = False
 
-            home_factor = 1.1 if home else 0.9
+                opp_data = team_strength.get(opp, {"attack_strength": 1, "defense_weakness": 1})
 
-            attack_factor = opp_def * home_factor
+                opp_def = opp_data["defense_weakness"]
+                opp_att = opp_data["attack_strength"]
 
-            cs_prob = np.exp(-opp_att)
+                home_factor = 1.1 if home else 0.9
+                attack_factor = opp_def * home_factor
 
-            # KEY CHANGE: scale by expected minutes
-            attack_pts = p["xAttack_per90"] * p["mins_factor"] * attack_factor
+                cs_prob = np.exp(-opp_att)
 
-            appearance = 2 * p["mins_factor"]
+                attack_pts = p["xAttack_per90"] * p["mins_factor"] * attack_factor
+                appearance = 2 * p["mins_factor"]
 
-            if p["pos"] in ["MID", "FWD"]:
-                xp = attack_pts + appearance
+                if p["pos"] in ["MID", "FWD"]:
+                    xp = attack_pts + appearance
 
-            elif p["pos"] == "DEF":
-                xp = attack_pts + (cs_prob * 4 * p["mins_factor"]) + appearance
+                elif p["pos"] == "DEF":
+                    xp = attack_pts + (cs_prob * 4 * p["mins_factor"]) + appearance
 
-            elif p["pos"] in ["GKP", "GK"]:
-                saves = p["saves_per_90"] * p["mins_factor"]
-                xp = (cs_prob * 4 * p["mins_factor"]) + saves + appearance
+                elif p["pos"] in ["GKP", "GK"]:
+                    saves = p["saves_per_90"] * p["mins_factor"]
+                    xp = (cs_prob * 4 * p["mins_factor"]) + saves + appearance
 
-            else:
-                xp = attack_pts + appearance
+                else:
+                    xp = attack_pts + appearance
 
-            player_total += xp
+                gw_points += xp
+
+            player_total += gw_points
 
         total_pts.append(player_total)
+        fixtures_count.append(total_matches)
 
     df["xPts_total"] = total_pts
     df["xPts_per_match"] = df["xPts_total"] / horizon
+    df["fixtures_in_horizon"] = fixtures_count
 
     # ----------------------------
-    # Form adjustment
+    # Adjustments
     # ----------------------------
     avg_form = df["form"].replace(0, np.nan).mean()
     df["form_factor"] = 1 + form_weight * np.tanh((df["form"] - avg_form) / avg_form)
     df["form_factor"] = df["form_factor"].clip(0.85, 1.15)
 
-    # Bonus
     bonus_per90 = df["bonus"] / (df["minutes"] / 90).replace(0, np.nan)
     avg_bonus = bonus_per90.replace(0, np.nan).mean()
 
     df["bonus_factor"] = 1 + bonus_weight * np.tanh((bonus_per90 - avg_bonus) / avg_bonus)
     df["bonus_factor"] = df["bonus_factor"].clip(0.9, 1.1)
 
-    # Apply adjustments
     df["xPts_total"] *= df["form_factor"] * df["bonus_factor"]
     df["xPts_per_match"] *= df["form_factor"] * df["bonus_factor"]
 

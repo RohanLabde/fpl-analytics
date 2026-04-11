@@ -3,7 +3,7 @@ import numpy as np
 import requests
 import streamlit as st
 
-from fpl_tool.model import build_player_master, v4_expected_points
+from fpl_tool.model import build_player_master, v5_expected_points
 
 
 # -----------------------
@@ -27,7 +27,7 @@ def load_fixtures():
 
 @st.cache_data(ttl=3600)
 def run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight):
-    return v4_expected_points(
+    return v5_expected_points(
         pm.copy(),
         fixtures.copy(),
         teams.copy(),
@@ -133,7 +133,7 @@ def get_fixture_swing_teams(fixtures, teams, horizon):
 # UI START
 # -----------------------
 st.set_page_config(layout="wide")
-st.title("⚽ FPL Analytics – v4 (Minutes-Aware AI)")
+st.title("⚽ FPL Analytics – v5 (DGW/BGW + Minutes-Aware AI)")
 
 players, teams, element_types = load_fpl_data()
 fixtures = load_fixtures()
@@ -143,7 +143,7 @@ pm = build_player_master(players, teams, element_types)
 # Sidebar
 st.sidebar.header("⚙️ Settings")
 
-horizon = st.sidebar.slider("Fixture Horizon", 1, 10, 5)
+horizon = st.sidebar.slider("Gameweek Horizon", 1, 10, 5)
 form_weight = st.sidebar.slider("Form Weight", 0.0, 1.0, 0.3)
 bonus_weight = st.sidebar.slider("Bonus Weight", 0.0, 0.5, 0.2)
 
@@ -185,6 +185,7 @@ with tab2:
         st.dataframe(dfp[[
             "web_name", "team_name",
             "minutes", "exp_minutes",
+            "fixtures_in_horizon",
             "xPts_total", "xPts_per_match"
         ]])
 
@@ -195,32 +196,31 @@ with tab2:
 with tab3:
     st.header("🧠 Smart FPL Decisions")
 
-    # Filter out low-minute players globally
     df_filtered = pred[pred["minutes"] > 300]
 
     st.subheader("👑 Captain Picks (MID/FWD)")
     st.dataframe(get_captain_picks(df_filtered)[[
-        "web_name", "team_name", "xPts_per_match"
+        "web_name", "team_name", "xPts_per_match", "fixtures_in_horizon"
     ]])
 
     st.subheader("💎 Differentials")
     st.dataframe(get_differentials(df_filtered)[[
-        "web_name", "team_name", "selected_by_percent", "xPts_per_match"
+        "web_name", "team_name", "selected_by_percent", "xPts_per_match", "fixtures_in_horizon"
     ]])
 
     st.subheader("🛡 Safe Picks")
     st.dataframe(get_safe_picks(df_filtered)[[
-        "web_name", "team_name", "selected_by_percent", "xPts_per_match"
+        "web_name", "team_name", "selected_by_percent", "xPts_per_match", "fixtures_in_horizon"
     ]])
 
     st.subheader("🚨 Avoid Players")
     st.dataframe(get_avoid_players(df_filtered)[[
-        "web_name", "team_name", "xPts_per_match"
+        "web_name", "team_name", "xPts_per_match", "fixtures_in_horizon"
     ]])
 
     st.subheader("🧤 Best Goalkeepers")
     st.dataframe(get_best_goalkeepers(df_filtered)[[
-        "web_name", "team_name", "xPts_per_match"
+        "web_name", "team_name", "xPts_per_match", "fixtures_in_horizon"
     ]])
 
     st.subheader("📅 Fixture Swings")
@@ -238,4 +238,4 @@ with tab3:
         st.dataframe(bad)
 
 
-st.success("✅ v4 Model Active: Minutes-aware, realistic, decision-grade predictions.")
+st.success("✅ v5 Model Active: DGW/BGW aware + Minutes-aware + Strategy-ready.")

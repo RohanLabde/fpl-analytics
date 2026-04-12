@@ -40,6 +40,42 @@ def run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight):
 
 
 # -----------------------
+# TEAM SUMMARY (FIXED DASHBOARD)
+# -----------------------
+def build_team_summary(fixtures, teams):
+    fx = fixtures[fixtures["finished"] == True]
+
+    rows = []
+
+    for _, t in teams.iterrows():
+        tid = t["id"]
+
+        team_fx = fx[(fx["team_h"] == tid) | (fx["team_a"] == tid)]
+
+        if len(team_fx) == 0:
+            continue
+
+        GF = GA = 0
+
+        for _, m in team_fx.iterrows():
+            if m["team_h"] == tid:
+                GF += m["team_h_score"]
+                GA += m["team_a_score"]
+            else:
+                GF += m["team_a_score"]
+                GA += m["team_h_score"]
+
+        rows.append({
+            "Team": t["name"],
+            "Goals Scored": GF,
+            "Goals Conceded": GA,
+            "Matches": len(team_fx)
+        })
+
+    return pd.DataFrame(rows).sort_values("Goals Scored", ascending=False)
+
+
+# -----------------------
 # DECISION ENGINE
 # -----------------------
 def get_captain_picks(df):
@@ -97,7 +133,6 @@ def suggest_transfers_v2(current_team_names, pred_df, budget=1.0, max_transfers=
 
             in_players = pool.loc[list(in_combo)]
 
-            # Position match
             if sorted(out_players["pos"].values) != sorted(in_players["pos"].values):
                 continue
 
@@ -143,7 +178,6 @@ form_weight = st.sidebar.slider("Form Weight", 0.0, 1.0, 0.3)
 bonus_weight = st.sidebar.slider("Bonus Weight", 0.0, 0.5, 0.2)
 
 pred = run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight)
-
 pred["selected_by_percent"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0)
 
 # Tabs
@@ -160,12 +194,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 # -----------------------
 with tab1:
     st.header("📊 Team Overview")
-
-    st.dataframe(
-        fixtures[fixtures["finished"] == True][
-            ["team_h", "team_a", "team_h_score", "team_a_score"]
-        ].head(50)
-    )
+    st.dataframe(build_team_summary(fixtures, teams))
 
 
 # -----------------------
@@ -199,10 +228,10 @@ with tab3:
     df_filtered = pred[pred["minutes"] > 300]
 
     st.subheader("👑 Captain Picks")
-    st.dataframe(get_captain_picks(df_filtered)[["web_name", "xPts_per_match"]])
+    st.dataframe(get_captain_picks(df_filtered)[["web_name", "xPts_per_match", "fixtures_in_horizon"]])
 
     st.subheader("💎 Differentials")
-    st.dataframe(get_differentials(df_filtered)[["web_name", "xPts_per_match"]])
+    st.dataframe(get_differentials(df_filtered)[["web_name", "xPts_per_match", "fixtures_in_horizon"]])
 
     st.subheader("🛡 Safe Picks")
     st.dataframe(get_safe_picks(df_filtered)[["web_name", "xPts_per_match"]])
@@ -220,29 +249,40 @@ with tab3:
 with tab4:
     st.header("🔄 Transfer Optimizer v2")
 
-    squad_input = st.text_area(
-        "Enter your squad (comma separated)",
-        "Saka, Haaland, Salah"
+    player_names = sorted(pred["web_name"].unique())
+
+    selected_players = st.multiselect(
+        "Select your squad (15 players)",
+        options=player_names,
+        max_selections=15
     )
 
     budget = st.number_input("Extra Budget (£m)", 0.0, 10.0, 1.0)
     transfers = st.selectbox("Transfers", [1, 2], index=1)
 
+    if len(selected_players) > 0:
+        st.subheader("📋 Your Squad")
+        st.dataframe(pred[pred["web_name"].isin(selected_players)][
+            ["web_name", "team_name", "pos", "xPts_total"]
+        ])
+
     if st.button("Optimize Transfers"):
 
-        squad_list = [x.strip() for x in squad_input.split(",")]
-
-        result = suggest_transfers_v2(
-            squad_list,
-            pred,
-            budget,
-            transfers
-        )
-
-        if result.empty:
-            st.warning("No better combination found.")
+        if len(selected_players) != 15:
+            st.warning("Please select exactly 15 players.")
         else:
-            st.dataframe(result)
+            result = suggest_transfers_v2(
+                selected_players,
+                pred,
+                budget,
+                transfers
+            )
+
+            if result.empty:
+                st.warning("No better combination found.")
+            else:
+                st.subheader("🔥 Optimal Transfers")
+                st.dataframe(result)
 
 
 st.success("✅ v5 AI + Optimizer v2 Active 🚀")

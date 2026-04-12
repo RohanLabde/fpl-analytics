@@ -157,8 +157,29 @@ tabs = st.tabs(["Dashboard","Explorer","Decisions","Transfers","XI Optimizer"])
 # DASHBOARD
 # -----------------------
 with tabs[0]:
-    st.write("Model ready")
+    st.header("📊 Dashboard")
 
+    df = pred.copy()
+
+    # 🔥 Top players overall
+    st.subheader("🔥 Top Players (Overall)")
+
+    st.dataframe(
+        df.sort_values("xPts_total", ascending=False)
+        .head(10)[["web_name", "team_name", "pos", "xPts_total"]]
+    )
+
+    # 🔥 Best per position
+    st.subheader("📌 Best Players by Position")
+
+    for pos in ["GKP", "DEF", "MID", "FWD"]:
+        st.markdown(f"### {pos}")
+
+        st.dataframe(
+            df[df["pos"] == pos]
+            .sort_values("xPts_total", ascending=False)
+            .head(5)[["web_name", "team_name", "xPts_total"]]
+        )
 
 # -----------------------
 # EXPLORER
@@ -177,14 +198,44 @@ with tabs[1]:
 # DECISIONS
 # -----------------------
 with tabs[2]:
-    df = pred[pred.minutes>300]
+    st.header("🧠 Smart Decisions")
 
-    st.subheader("Captain Picks")
-    st.dataframe(df.sort_values("xPts_per_match",ascending=False).head(5))
+    df = pred[pred["minutes"] > 300]
 
-    st.subheader("Differentials")
-    st.dataframe(df[df.selected_by_percent<10].head(5))
+    # ✅ Captain Picks (MID + FWD ONLY)
+    st.subheader("👑 Captain Picks (MID/FWD)")
 
+    captains = df[df["pos"].isin(["MID", "FWD"])] \
+        .sort_values("xPts_per_match", ascending=False) \
+        .head(5)
+
+    st.dataframe(captains)
+
+    # ✅ Differentials (exclude GK)
+    st.subheader("💎 Differentials (<10% owned)")
+
+    differentials = df[
+        (df["selected_by_percent"] < 10) &
+        (df["pos"] != "GKP")
+    ].sort_values("xPts_per_match", ascending=False).head(5)
+
+    st.dataframe(differentials)
+
+    # ✅ Safe Picks
+    st.subheader("🛡 Safe Picks (>20% owned)")
+
+    safe = df[df["selected_by_percent"] > 20] \
+        .sort_values("xPts_per_match", ascending=False).head(5)
+
+    st.dataframe(safe)
+
+    # ✅ Goalkeepers (separate)
+    st.subheader("🧤 Best Goalkeepers")
+
+    gk = df[df["pos"] == "GKP"] \
+        .sort_values("xPts_per_match", ascending=False).head(5)
+
+    st.dataframe(gk)
 
 # -----------------------
 # TRANSFERS

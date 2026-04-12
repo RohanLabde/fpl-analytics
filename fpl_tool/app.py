@@ -92,12 +92,6 @@ def get_safe_picks(df):
         .sort_values("xPts_per_match", ascending=False).head(5)
 
 
-def get_avoid_players(df):
-    return df[(df["pos"] != "GKP") &
-              (df["selected_by_percent"] > 15) &
-              (df["xPts_per_match"] < df["xPts_per_match"].quantile(0.4))].head(5)
-
-
 def get_best_goalkeepers(df):
     return df[df["pos"] == "GKP"].sort_values("xPts_per_match", ascending=False).head(5)
 
@@ -159,134 +153,146 @@ def suggest_transfers_v2(current_team_names, pred_df, budget=1.0, max_transfers=
 
 
 # -----------------------
+# FULL SQUAD BUILDER
+# -----------------------
+def build_optimal_squad(pred_df, budget=100):
+
+    df = pred_df.sort_values("xPts_total", ascending=False)
+
+    squad = []
+    team_count = {}
+    total_cost = 0
+
+    limits = {"GKP": 2, "DEF": 5, "MID": 5, "FWD": 3}
+    counts = {"GKP": 0, "DEF": 0, "MID": 0, "FWD": 0}
+
+    for _, player in df.iterrows():
+
+        pos = player["pos"]
+        team = player["team_name"]
+        cost = player["price_m"]
+
+        if counts[pos] >= limits[pos]:
+            continue
+
+        if team_count.get(team, 0) >= 3:
+            continue
+
+        if total_cost + cost > budget:
+            continue
+
+        squad.append(player)
+        counts[pos] += 1
+        team_count[team] = team_count.get(team, 0) + 1
+        total_cost += cost
+
+        if sum(counts.values()) == 15:
+            break
+
+    return pd.DataFrame(squad), total_cost
+
+
+# -----------------------
+# STARTING XI OPTIMIZER
+# -----------------------
+def optimize_starting_xi(squad_df):
+
+    best_score = -999
+    best_team = None
+
+    gk = squad_df[squad_df["pos"] == "GKP"]
+    defenders = squad_df[squad_df["pos"] == "DEF"]
+    mids = squad_df[squad_df["pos"] == "MID"]
+    fwds = squad_df[squad_df["pos"] == "FWD"]
+
+    formations = [(3,4,3),(3,5,2),(4,4,2),(4,3,3),(5,3,2)]
+
+    for d,m,f in formations:
+
+        if len(defenders)<d or len(mids)<m or len(fwds)<f:
+            continue
+
+        for g in combinations(gk.index,1):
+            for d_ in combinations(defenders.index,d):
+                for m_ in combinations(mids.index,m):
+                    for f_ in combinations(fwds.index,f):
+
+                        idx = list(g)+list(d_)+list(m_)+list(f_)
+                        team = squad_df.loc[idx]
+
+                        score = team["xPts_per_match"].sum()
+
+                        if score > best_score:
+                            best_score = score
+                            best_team = team
+
+    return best_team, best_score
+
+
+def pick_captains(team_df):
+    sorted_team = team_df.sort_values("xPts_per_match", ascending=False)
+    return sorted_team.iloc[0], sorted_team.iloc[1]
+
+
+# -----------------------
 # UI START
 # -----------------------
 st.set_page_config(layout="wide")
-st.title("⚽ FPL Analytics – v5 AI (DGW/BGW + Optimizer)")
+st.title("⚽ FPL AI – Full System")
 
 players, teams, element_types = load_fpl_data()
 fixtures = load_fixtures()
 
 pm = build_player_master(players, teams, element_types)
 
-# Sidebar
-st.sidebar.header("⚙️ Settings")
-
-horizon = st.sidebar.slider("Gameweek Horizon", 1, 10, 5)
-form_weight = st.sidebar.slider("Form Weight", 0.0, 1.0, 0.3)
-bonus_weight = st.sidebar.slider("Bonus Weight", 0.0, 0.5, 0.2)
+horizon = st.sidebar.slider("Gameweek Horizon",1,10,5)
+form_weight = st.sidebar.slider("Form Weight",0.0,1.0,0.3)
+bonus_weight = st.sidebar.slider("Bonus Weight",0.0,0.5,0.2)
 
 pred = run_model(pm, fixtures, teams, horizon, form_weight, bonus_weight)
 pred["selected_by_percent"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0)
 
-# Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📊 Dashboard",
-    "🎯 Player Explorer",
-    "🧠 Decision Engine",
-    "🔄 Transfer Optimizer"
+tab1,tab2,tab3,tab4,tab5,tab6 = st.tabs([
+    "📊 Dashboard","🎯 Explorer","🧠 Decisions","🔄 Transfers","🏆 Squad Builder","⚽ XI Optimizer"
 ])
 
-
-# -----------------------
-# TAB 1: DASHBOARD
-# -----------------------
+# Dashboard
 with tab1:
-    st.header("📊 Team Overview")
     st.dataframe(build_team_summary(fixtures, teams))
 
-
-# -----------------------
-# TAB 2: PLAYER EXPLORER
-# -----------------------
+# Explorer
 with tab2:
-    st.header("🎯 Player Rankings")
-
-    min_minutes = st.slider("Minimum Minutes", 0, 2000, 500)
-
-    for pos in ["GKP", "DEF", "MID", "FWD"]:
+    for pos in ["GKP","DEF","MID","FWD"]:
         st.subheader(pos)
+        st.dataframe(pred[pred["pos"]==pos].sort_values("xPts_total",ascending=False).head(10))
 
-        dfp = pred[(pred["pos"] == pos) & (pred["minutes"] >= min_minutes)]
-        dfp = dfp.sort_values("xPts_total", ascending=False).head(10)
-
-        st.dataframe(dfp[[
-            "web_name", "team_name",
-            "minutes", "exp_minutes",
-            "fixtures_in_horizon",
-            "xPts_total"
-        ]])
-
-
-# -----------------------
-# TAB 3: DECISION ENGINE
-# -----------------------
+# Decision Engine
 with tab3:
-    st.header("🧠 Smart Decisions")
+    df = pred[pred["minutes"]>300]
+    st.dataframe(get_captain_picks(df)[["web_name","xPts_per_match"]])
+    st.dataframe(get_differentials(df)[["web_name","xPts_per_match"]])
 
-    df_filtered = pred[pred["minutes"] > 300]
-
-    st.subheader("👑 Captain Picks")
-    st.dataframe(get_captain_picks(df_filtered)[["web_name", "xPts_per_match"]])
-
-    st.subheader("💎 Differentials")
-    st.dataframe(get_differentials(df_filtered)[["web_name", "xPts_per_match"]])
-
-    st.subheader("🛡 Safe Picks")
-    st.dataframe(get_safe_picks(df_filtered)[["web_name", "xPts_per_match"]])
-
-    st.subheader("🚨 Avoid Players")
-    st.dataframe(get_avoid_players(df_filtered)[["web_name", "xPts_per_match"]])
-
-    st.subheader("🧤 Best Goalkeepers")
-    st.dataframe(get_best_goalkeepers(df_filtered)[["web_name", "xPts_per_match"]])
-
-
-# -----------------------
-# TAB 4: POSITION-BASED SQUAD BUILDER + OPTIMIZER
-# -----------------------
+# Transfers
 with tab4:
-    st.header("🔄 Transfer Optimizer v2")
+    st.write("Use previous squad builder")
 
-    st.subheader("🧱 Build Your Squad")
+# Squad Builder
+with tab5:
+    budget = st.slider("Budget",80,120,100)
 
-    def select_players(position, count):
-        options = sorted(pred[pred["pos"] == position]["web_name"].unique())
-        return st.multiselect(f"{position} ({count})", options)
+    if st.button("Build Squad"):
+        squad, cost = build_optimal_squad(pred, budget)
+        st.write(f"Cost: {cost}")
+        st.dataframe(squad[["web_name","pos","team_name","price_m","xPts_total"]])
 
-    gk = select_players("GKP", 2)
-    def_ = select_players("DEF", 5)
-    mid = select_players("MID", 5)
-    fwd = select_players("FWD", 3)
+# XI Optimizer
+with tab6:
+    if st.button("Optimize XI"):
+        squad, _ = build_optimal_squad(pred,100)
+        xi, score = optimize_starting_xi(squad)
+        cap, vc = pick_captains(xi)
 
-    squad = gk + def_ + mid + fwd
-
-    st.caption(f"Selected: {len(squad)} / 15 players")
-
-    if len(gk) != 2 or len(def_) != 5 or len(mid) != 5 or len(fwd) != 3:
-        st.warning("⚠️ Squad must be: 2 GK, 5 DEF, 5 MID, 3 FWD")
-
-    if len(squad) > 0:
-        st.subheader("📋 Your Squad")
-        st.dataframe(pred[pred["web_name"].isin(squad)][
-            ["web_name", "team_name", "pos", "xPts_total"]
-        ])
-
-    budget = st.number_input("Extra Budget (£m)", 0.0, 10.0, 1.0)
-    transfers = st.selectbox("Transfers", [1, 2], index=1)
-
-    if st.button("Optimize Transfers"):
-
-        if len(squad) != 15:
-            st.error("❌ Please build a valid 15-player squad.")
-        else:
-            result = suggest_transfers_v2(squad, pred, budget, transfers)
-
-            if result.empty:
-                st.warning("No better transfers found.")
-            else:
-                st.subheader("🔥 Optimal Transfers")
-                st.dataframe(result)
-
-
-st.success("✅ v5 AI + Squad Builder + Optimizer Active 🚀")
+        st.write("Best XI Score:",score)
+        st.dataframe(xi[["web_name","pos","xPts_per_match"]])
+        st.write("Captain:",cap["web_name"])
+        st.write("Vice Captain:",vc["web_name"])

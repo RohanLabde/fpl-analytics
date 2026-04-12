@@ -105,6 +105,9 @@ def suggest_transfers(squad_names, pred):
                     "GAIN": round(gain,2)
                 })
 
+    if len(suggestions) == 0:
+    return pd.DataFrame(columns=["OUT", "IN", "GAIN"])
+
     return pd.DataFrame(suggestions).sort_values("GAIN", ascending=False)
 
 
@@ -123,26 +126,21 @@ bw = st.sidebar.slider("Bonus Weight",0.0,0.5,0.2)
 pred = run_model(players, teams, et, fixtures, h, fw, bw)
 
 # -----------------------
-# SESSION STATE (MANUAL SQUAD)
+# SESSION STATE INIT
 # -----------------------
 if "user_squad" not in st.session_state:
     st.session_state.user_squad = []
 
-
-# -----------------------
-# GLOBAL SQUAD SELECTOR
-# -----------------------
-st.subheader("🧱 Select Your Squad")
-
 player_names = sorted(pred["web_name"].unique())
 
+# -----------------------
+# CLEAN MULTISELECT (FIXED)
+# -----------------------
 selected_players = st.multiselect(
-    "Select 15 players",
+    "Select your squad (15 players)",
     options=player_names,
-    default=st.session_state.user_squad
+    key="user_squad"   # ✅ THIS is the fix
 )
-
-st.session_state.user_squad = selected_players
 
 st.caption(f"Selected: {len(selected_players)} / 15")
 

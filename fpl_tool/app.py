@@ -26,8 +26,8 @@ def load_data():
 # MODEL
 # -----------------------
 @st.cache_data(ttl=3600)
-def run_model(players, teams, element_types, fixtures, horizon, fw, bw):
-    pm = build_player_master(players, teams, element_types)
+def run_model(players, teams, et, fixtures, horizon, fw, bw):
+    pm = build_player_master(players, teams, et)
 
     pred = v5_expected_points(
         pm.copy(),
@@ -38,7 +38,6 @@ def run_model(players, teams, element_types, fixtures, horizon, fw, bw):
         bonus_weight=bw
     )
 
-    # CLEAN DATA
     pred["selected_by_percent"] = pd.to_numeric(pred["selected_by_percent"], errors="coerce").fillna(0)
 
     return pred[[
@@ -52,29 +51,6 @@ def run_model(players, teams, element_types, fixtures, horizon, fw, bw):
 # -----------------------
 # OPTIMIZERS
 # -----------------------
-def build_optimal_squad(pred, budget=100):
-    df = pred.sort_values("xPts_total", ascending=False)
-
-    squad, cost = [], 0
-    team_count = {}
-    limits = {"GKP":2,"DEF":5,"MID":5,"FWD":3}
-    counts = {"GKP":0,"DEF":0,"MID":0,"FWD":0}
-
-    for _, p in df.iterrows():
-        if counts[p.pos] >= limits[p.pos]: continue
-        if team_count.get(p.team_name,0) >= 3: continue
-        if cost + p.price_m > budget: continue
-
-        squad.append(p)
-        counts[p.pos]+=1
-        team_count[p.team_name]=team_count.get(p.team_name,0)+1
-        cost += p.price_m
-
-        if sum(counts.values())==15: break
-
-    return pd.DataFrame(squad), cost
-
-
 def optimize_xi(squad):
     best_score, best_team = -999, None
 
@@ -136,7 +112,7 @@ def suggest_transfers(squad_names, pred):
 # UI
 # -----------------------
 st.set_page_config(layout="wide")
-st.title("⚽ FPL AI – Full System")
+st.title("⚽ FPL AI – Smart Assistant")
 
 players, teams, et, fixtures = load_data()
 
@@ -146,18 +122,42 @@ bw = st.sidebar.slider("Bonus Weight",0.0,0.5,0.2)
 
 pred = run_model(players, teams, et, fixtures, h, fw, bw)
 
-# SESSION STATE
-if "squad" not in st.session_state:
-    st.session_state.squad = None
+# -----------------------
+# SESSION STATE (MANUAL SQUAD)
+# -----------------------
+if "user_squad" not in st.session_state:
+    st.session_state.user_squad = []
 
-tabs = st.tabs(["Dashboard","Explorer","Decisions","Transfers","Squad Builder","XI Optimizer"])
+
+# -----------------------
+# GLOBAL SQUAD SELECTOR
+# -----------------------
+st.subheader("🧱 Select Your Squad")
+
+player_names = sorted(pred["web_name"].unique())
+
+selected_players = st.multiselect(
+    "Select 15 players",
+    options=player_names,
+    default=st.session_state.user_squad
+)
+
+st.session_state.user_squad = selected_players
+
+st.caption(f"Selected: {len(selected_players)} / 15")
+
+
+# -----------------------
+# TABS
+# -----------------------
+tabs = st.tabs(["Dashboard","Explorer","Decisions","Transfers","XI Optimizer"])
 
 
 # -----------------------
 # DASHBOARD
 # -----------------------
 with tabs[0]:
-    st.write("Model ready. Use other tabs.")
+    st.write("Model ready")
 
 
 # -----------------------
@@ -166,7 +166,11 @@ with tabs[0]:
 with tabs[1]:
     for pos in ["GKP","DEF","MID","FWD"]:
         st.subheader(pos)
-        st.dataframe(pred[pred.pos==pos].sort_values("xPts_total",ascending=False).head(10))
+        st.dataframe(
+            pred[pred.pos==pos]
+            .sort_values("xPts_total",ascending=False)
+            .head(10)
+        )
 
 
 # -----------------------
@@ -183,45 +187,39 @@ with tabs[2]:
 
 
 # -----------------------
-# SQUAD BUILDER
-# -----------------------
-with tabs[4]:
-    budget = st.slider("Budget",80,120,100)
-
-    if st.button("Build Squad"):
-        squad, cost = build_optimal_squad(pred, budget)
-
-        if len(squad)==15:
-            st.session_state.squad = squad
-            st.success(f"Squad built (£{round(cost,1)}m)")
-            st.dataframe(squad)
-        else:
-            st.error("Failed to build squad")
-
-
-# -----------------------
 # TRANSFERS
 # -----------------------
 with tabs[3]:
-    if st.session_state.squad is None:
-        st.warning("Build squad first")
+    st.header("🔄 Transfer Suggestions")
+
+    if len(st.session_state.user_squad) != 15:
+        st.warning("Select exactly 15 players above")
     else:
-        names = st.session_state.squad.web_name.tolist()
-        st.dataframe(suggest_transfers(names, pred))
+        result = suggest_transfers(st.session_state.user_squad, pred)
+
+        if result.empty:
+            st.warning("No suggestions found")
+        else:
+            st.dataframe(result)
 
 
 # -----------------------
 # XI OPTIMIZER
 # -----------------------
-with tabs[5]:
-    if st.session_state.squad is None:
-        st.warning("Build squad first")
+with tabs[4]:
+    st.header("⚽ Best Starting XI")
+
+    if len(st.session_state.user_squad) != 15:
+        st.warning("Select exactly 15 players above")
     else:
-        xi, score = optimize_xi(st.session_state.squad)
+        squad_df = pred[pred.web_name.isin(st.session_state.user_squad)]
+
+        xi, score = optimize_xi(squad_df)
         cap, vc = pick_captains(xi)
 
         st.success(f"Best XI Score: {round(score,2)}")
-        st.dataframe(xi)
 
-        st.write("Captain:", cap.web_name)
-        st.write("Vice Captain:", vc.web_name)
+        st.dataframe(xi[["web_name","pos","team_name","xPts_per_match"]])
+
+        st.write(f"👑 Captain: {cap.web_name}")
+        st.write(f"🥈 Vice Captain: {vc.web_name}")

@@ -106,9 +106,9 @@ def suggest_transfers(squad_names, pred):
                 })
 
     if len(suggestions) == 0:
-    return pd.DataFrame(columns=["OUT", "IN", "GAIN"])
+        return pd.DataFrame(columns=["OUT", "IN", "GAIN"])
 
-    return pd.DataFrame(suggestions).sort_values("GAIN", ascending=False)
+        return pd.DataFrame(suggestions).sort_values("GAIN", ascending=False)
 
 
 # -----------------------

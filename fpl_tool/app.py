@@ -161,14 +161,6 @@ with tabs[0]:
 
     df = pred.copy()
 
-    # 🔥 Top players overall
-    st.subheader("🔥 Top Players (Overall)")
-
-    st.dataframe(
-        df.sort_values("xPts_total", ascending=False)
-        .head(10)[["web_name", "team_name", "pos", "xPts_total"]]
-    )
-
     # 🔥 Best per position
     st.subheader("📌 Best Players by Position")
 

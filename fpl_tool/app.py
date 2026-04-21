@@ -3,7 +3,7 @@ import requests
 import streamlit as st
 from itertools import combinations
 
-from fpl_tool.model import build_player_master, v5_expected_points
+from fpl_tool.model import build_player_master, v6_expected_points
 
 
 # -----------------------
@@ -23,13 +23,14 @@ def load_data():
 
 
 # -----------------------
-# MODEL
+# MODEL RUN
 # -----------------------
 @st.cache_data(ttl=3600)
 def run_model(players, teams, et, fixtures, horizon, fw, bw):
+
     pm = build_player_master(players, teams, et)
 
-    pred = v5_expected_points(
+    pred = v6_expected_points(
         pm.copy(),
         fixtures.copy(),
         teams.copy(),
@@ -49,28 +50,62 @@ def run_model(players, teams, et, fixtures, horizon, fw, bw):
 
 
 # -----------------------
-# OPTIMIZERS
+# TRANSFER ENGINE (FIXED)
+# -----------------------
+def suggest_transfers(squad_names, pred):
+
+    squad = pred[pred.web_name.isin(squad_names)]
+    pool = pred[~pred.web_name.isin(squad_names)]
+
+    weakest = squad.sort_values("xPts_total").head(2)
+    pool = pool.sort_values("xPts_total", ascending=False).head(30)
+
+    suggestions = []
+
+    for _, w in weakest.iterrows():
+        replacements = pool[pool.pos == w.pos].head(5)
+
+        for _, r in replacements.iterrows():
+            gain = r.xPts_total - w.xPts_total
+            if gain > 0:
+                suggestions.append({
+                    "OUT": w.web_name,
+                    "IN": r.web_name,
+                    "GAIN": round(gain, 2)
+                })
+
+    if len(suggestions) == 0:
+        return pd.DataFrame(columns=["OUT", "IN", "GAIN"])
+
+    return pd.DataFrame(suggestions).sort_values("GAIN", ascending=False)
+
+
+# -----------------------
+# XI OPTIMIZER
 # -----------------------
 def optimize_xi(squad):
+
     best_score, best_team = -999, None
 
-    gk = squad[squad.pos=="GKP"]
-    d = squad[squad.pos=="DEF"]
-    m = squad[squad.pos=="MID"]
-    f = squad[squad.pos=="FWD"]
+    gk = squad[squad.pos == "GKP"]
+    d = squad[squad.pos == "DEF"]
+    m = squad[squad.pos == "MID"]
+    f = squad[squad.pos == "FWD"]
 
     formations = [(3,4,3),(3,5,2),(4,4,2),(4,3,3),(5,3,2)]
 
-    for D,M,F in formations:
-        if len(d)<D or len(m)<M or len(f)<F: continue
+    for D, M, F in formations:
 
-        for g in combinations(gk.index,1):
-            for d_ in combinations(d.index,D):
-                for m_ in combinations(m.index,M):
-                    for f_ in combinations(f.index,F):
+        if len(d) < D or len(m) < M or len(f) < F:
+            continue
+
+        for g in combinations(gk.index, 1):
+            for d_ in combinations(d.index, D):
+                for m_ in combinations(m.index, M):
+                    for f_ in combinations(f.index, F):
 
                         team = squad.loc[list(g)+list(d_)+list(m_)+list(f_)]
-                        score = team.xPts_per_match.sum()
+                        score = team["xPts_per_match"].sum()
 
                         if score > best_score:
                             best_score = score
@@ -84,33 +119,6 @@ def pick_captains(xi):
     return xi.iloc[0], xi.iloc[1]
 
 
-def suggest_transfers(squad_names, pred):
-    squad = pred[pred.web_name.isin(squad_names)]
-    pool = pred[~pred.web_name.isin(squad_names)]
-
-    weakest = squad.sort_values("xPts_total").head(2)
-    pool = pool.sort_values("xPts_total", ascending=False).head(30)
-
-    suggestions = []
-
-    for _, w in weakest.iterrows():
-        replacements = pool[pool.pos==w.pos].head(5)
-
-        for _, r in replacements.iterrows():
-            gain = r.xPts_total - w.xPts_total
-            if gain > 0:
-                suggestions.append({
-                    "OUT": w.web_name,
-                    "IN": r.web_name,
-                    "GAIN": round(gain,2)
-                })
-
-    if len(suggestions) == 0:
-        return pd.DataFrame(columns=["OUT", "IN", "GAIN"])
-
-        return pd.DataFrame(suggestions).sort_values("GAIN", ascending=False)
-
-
 # -----------------------
 # UI
 # -----------------------
@@ -119,27 +127,25 @@ st.title("⚽ FPL AI – Smart Assistant")
 
 players, teams, et, fixtures = load_data()
 
-h = st.sidebar.slider("Horizon",1,10,5)
-fw = st.sidebar.slider("Form Weight",0.0,1.0,0.3)
-bw = st.sidebar.slider("Bonus Weight",0.0,0.5,0.2)
+# Sidebar
+h = st.sidebar.slider("Gameweek Horizon", 1, 10, 5)
+fw = st.sidebar.slider("Form Weight", 0.0, 1.0, 0.3)
+bw = st.sidebar.slider("Bonus Weight", 0.0, 0.5, 0.2)
 
 pred = run_model(players, teams, et, fixtures, h, fw, bw)
 
+
 # -----------------------
-# SESSION STATE INIT
+# SQUAD SELECTOR (FIXED)
 # -----------------------
-if "user_squad" not in st.session_state:
-    st.session_state.user_squad = []
+st.subheader("🧱 Select Your Squad")
 
 player_names = sorted(pred["web_name"].unique())
 
-# -----------------------
-# CLEAN MULTISELECT (FIXED)
-# -----------------------
 selected_players = st.multiselect(
-    "Select your squad (15 players)",
+    "Select 15 players",
     options=player_names,
-    key="user_squad"   # ✅ THIS is the fix
+    key="user_squad"
 )
 
 st.caption(f"Selected: {len(selected_players)} / 15")
@@ -152,24 +158,22 @@ tabs = st.tabs(["Dashboard","Explorer","Decisions","Transfers","XI Optimizer"])
 
 
 # -----------------------
-# DASHBOARD
+# DASHBOARD (FIXED)
 # -----------------------
 with tabs[0]:
     st.header("📊 Dashboard")
 
-    df = pred.copy()
+    st.subheader("Top Players by Position")
 
-    # 🔥 Best per position
-    st.subheader("📌 Best Players by Position")
-
-    for pos in ["GKP", "DEF", "MID", "FWD"]:
+    for pos in ["GKP","DEF","MID","FWD"]:
         st.markdown(f"### {pos}")
 
-        st.dataframe(
-            df[df["pos"] == pos]
-            .sort_values("xPts_total", ascending=False)
-            .head(5)[["web_name", "team_name", "xPts_total"]]
-        )
+        dfp = pred[pred.pos == pos] \
+            .sort_values("xPts_total", ascending=False) \
+            .head(5)
+
+        st.dataframe(dfp[["web_name","team_name","xPts_total"]])
+
 
 # -----------------------
 # EXPLORER
@@ -178,54 +182,48 @@ with tabs[1]:
     for pos in ["GKP","DEF","MID","FWD"]:
         st.subheader(pos)
         st.dataframe(
-            pred[pred.pos==pos]
-            .sort_values("xPts_total",ascending=False)
+            pred[pred.pos == pos]
+            .sort_values("xPts_total", ascending=False)
             .head(10)
         )
 
 
 # -----------------------
-# DECISIONS
+# DECISIONS (FIXED)
 # -----------------------
 with tabs[2]:
     st.header("🧠 Smart Decisions")
 
-    df = pred[pred["minutes"] > 300]
+    df = pred[pred.minutes > 300]
 
-    # ✅ Captain Picks (MID + FWD ONLY)
     st.subheader("👑 Captain Picks (MID/FWD)")
-
-    captains = df[df["pos"].isin(["MID", "FWD"])] \
-        .sort_values("xPts_per_match", ascending=False) \
+    st.dataframe(
+        df[df.pos.isin(["MID","FWD"])]
+        .sort_values("xPts_per_match", ascending=False)
         .head(5)
+    )
 
-    st.dataframe(captains)
+    st.subheader("💎 Differentials (<10%)")
+    st.dataframe(
+        df[(df.selected_by_percent < 10) & (df.pos != "GKP")]
+        .sort_values("xPts_per_match", ascending=False)
+        .head(5)
+    )
 
-    # ✅ Differentials (exclude GK)
-    st.subheader("💎 Differentials (<10% owned)")
+    st.subheader("🛡 Safe Picks")
+    st.dataframe(
+        df[df.selected_by_percent > 20]
+        .sort_values("xPts_per_match", ascending=False)
+        .head(5)
+    )
 
-    differentials = df[
-        (df["selected_by_percent"] < 10) &
-        (df["pos"] != "GKP")
-    ].sort_values("xPts_per_match", ascending=False).head(5)
-
-    st.dataframe(differentials)
-
-    # ✅ Safe Picks
-    st.subheader("🛡 Safe Picks (>20% owned)")
-
-    safe = df[df["selected_by_percent"] > 20] \
-        .sort_values("xPts_per_match", ascending=False).head(5)
-
-    st.dataframe(safe)
-
-    # ✅ Goalkeepers (separate)
     st.subheader("🧤 Best Goalkeepers")
+    st.dataframe(
+        df[df.pos == "GKP"]
+        .sort_values("xPts_per_match", ascending=False)
+        .head(5)
+    )
 
-    gk = df[df["pos"] == "GKP"] \
-        .sort_values("xPts_per_match", ascending=False).head(5)
-
-    st.dataframe(gk)
 
 # -----------------------
 # TRANSFERS
@@ -233,13 +231,13 @@ with tabs[2]:
 with tabs[3]:
     st.header("🔄 Transfer Suggestions")
 
-    if len(st.session_state.user_squad) != 15:
-        st.warning("Select exactly 15 players above")
+    if len(selected_players) != 15:
+        st.warning("Select exactly 15 players")
     else:
-        result = suggest_transfers(st.session_state.user_squad, pred)
+        result = suggest_transfers(selected_players, pred)
 
         if result.empty:
-            st.warning("No suggestions found")
+            st.warning("No good transfer suggestions found")
         else:
             st.dataframe(result)
 
@@ -250,10 +248,10 @@ with tabs[3]:
 with tabs[4]:
     st.header("⚽ Best Starting XI")
 
-    if len(st.session_state.user_squad) != 15:
-        st.warning("Select exactly 15 players above")
+    if len(selected_players) != 15:
+        st.warning("Select exactly 15 players")
     else:
-        squad_df = pred[pred.web_name.isin(st.session_state.user_squad)]
+        squad_df = pred[pred.web_name.isin(selected_players)]
 
         xi, score = optimize_xi(squad_df)
         cap, vc = pick_captains(xi)

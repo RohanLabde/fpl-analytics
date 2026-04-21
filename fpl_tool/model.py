@@ -18,7 +18,7 @@ def build_player_master(players, teams, element_types):
     df["price_m"] = df["now_cost"] / 10
 
     # -----------------------
-    # RAW POINTS PER MATCH
+    # RAW PERFORMANCE (PER 90)
     # -----------------------
     df["xPts_per_match_raw"] = (
         df["goals_scored"] * 4 +
@@ -28,7 +28,7 @@ def build_player_master(players, teams, element_types):
     ) / (df["minutes"] / 90 + 1e-6)
 
     # -----------------------
-    # BAYESIAN SHRINKAGE (KEY FIX)
+    # 🔥 BAYESIAN SHRINKAGE (CRITICAL FIX)
     # -----------------------
     global_avg = df["xPts_per_match_raw"].mean()
 
@@ -36,6 +36,15 @@ def build_player_master(players, teams, element_types):
         (df["xPts_per_match_raw"] * df["minutes"] + global_avg * 900)
         / (df["minutes"] + 900)
     )
+
+    # -----------------------
+    # 🔥 FORM (NEW)
+    # -----------------------
+    df["form"] = pd.to_numeric(df["form"], errors="coerce").fillna(0)
+
+    # Normalize form
+    max_form = df["form"].max() if df["form"].max() > 0 else 1
+    df["form_norm"] = df["form"] / max_form
 
     return df
 
@@ -49,7 +58,6 @@ def get_fixture_info(fixtures, horizon):
     upcoming = upcoming[upcoming["event"].notnull()]
     upcoming = upcoming.sort_values("event")
 
-    # Take next N gameweeks
     events = upcoming["event"].unique()[:horizon]
     upcoming = upcoming[upcoming["event"].isin(events)]
 
@@ -66,7 +74,6 @@ def get_fixture_info(fixtures, horizon):
             team_fixture_count[team] = team_fixture_count.get(team, 0) + 1
             team_difficulty_sum[team] = team_difficulty_sum.get(team, 0) + diff
 
-    # Average difficulty
     team_difficulty_avg = {
         team: team_difficulty_sum[team] / team_fixture_count[team]
         for team in team_fixture_count
@@ -107,19 +114,19 @@ def get_difficulty_factor(avg_diff):
 
 
 # -----------------------
-# V6.1 EXPECTED POINTS
+# V6.2 EXPECTED POINTS
 # -----------------------
 def v6_expected_points(df, fixtures, teams, horizon=5, form_weight=0.3, bonus_weight=0.2):
 
     df = df.copy()
 
     # -----------------------
-    # 🔥 HARD FILTER (REMOVE NOISE)
+    # 🔥 REMOVE LOW-MINUTE NOISE
     # -----------------------
     df = df[df["minutes"] >= 150].copy()
 
     # -----------------------
-    # FIXTURE INFO
+    # FIXTURE DATA
     # -----------------------
     fixture_count, difficulty_avg = get_fixture_info(fixtures, horizon)
 
@@ -133,13 +140,21 @@ def v6_expected_points(df, fixtures, teams, horizon=5, form_weight=0.3, bonus_we
     df["difficulty_factor"] = df["difficulty_avg"].apply(get_difficulty_factor)
 
     # -----------------------
-    # FINAL EXPECTED POINTS
+    # BASE EXPECTED POINTS
     # -----------------------
     df["xPts_total"] = (
         df["xPts_per_match"] *
         df["fixture_count"] *
         df["difficulty_factor"] *
         df["minutes_factor"]
+    )
+
+    # -----------------------
+    # 🔥 FORM ADJUSTMENT (KEY UPGRADE)
+    # -----------------------
+    df["xPts_total"] = (
+        df["xPts_total"] * (1 - form_weight)
+        + df["form_norm"] * df["xPts_total"].mean() * form_weight
     )
 
     return df
